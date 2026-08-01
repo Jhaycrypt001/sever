@@ -1,0 +1,220 @@
+# Default profile (infra): PostgreSQL + Redis only — apps run locally for hot-reload.
+# Full stack: docker compose --profile full up --build
+# Observability (ADR-029/050): add --profile observability and point the services
+# at the collector (it fans traces to Jaeger :16686, metrics to Prometheus :9090,
+# dashboards in Grafana :3001):
+#   OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318 \
+#     docker compose --profile full --profile observability up
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: app
+      POSTGRES_DB: aiagent
+    ports:
+      # Host port 5433 to avoid clashing with a locally installed PostgreSQL.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U app -d aiagent"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    # redis-stack-server = core Redis (Celery broker) + RediSearch, which the
+    # LangGraph Redis checkpointer needs for its indices (ADR-046). A plain
+    # redis:7-alpine works only with AGENT_ORCHESTRATOR=loop.
+    image: redis/redis-stack-server:7.4.0-v3
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    profiles: ["full"]
+    build: ./backend
+    environment:
+      DATABASE_URL: postgres://app:app@postgres:5432/aiagent
+      AGENT_API_URL: http://agent-api:8001
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me}
+      JWT_SECRET: ${JWT_SECRET:-change-me}
+      BIND_ADDR: 0.0.0.0:8000
+      # Abuse protection (ADR-017), passed through so e2e can loosen them.
+      DAILY_SEARCH_QUOTA: ${DAILY_SEARCH_QUOTA:-20}
+      RATE_LIMIT_AUTH_PER_MINUTE: ${RATE_LIMIT_AUTH_PER_MINUTE:-10}
+      RATE_LIMIT_API_PER_MINUTE: ${RATE_LIMIT_API_PER_MINUTE:-120}
+      # Per-account login throttle (ADR-057), email-keyed.
+      LOGIN_MAX_ATTEMPTS_PER_MINUTE: ${LOGIN_MAX_ATTEMPTS_PER_MINUTE:-10}
+      # Distributed rate limiting (ADR-037): empty = in-memory limiter.
+      RATE_LIMIT_REDIS_URL: ${RATE_LIMIT_REDIS_URL:-}
+      # Security audit log retention in days (ADR-057); 0 = keep forever.
+      SECURITY_EVENT_RETENTION_DAYS: ${SECURITY_EVENT_RETENTION_DAYS:-90}
+      # Digest webhook HMAC signing (ADR-047): empty = unsigned.
+      DIGEST_SIGNING_SECRET: ${DIGEST_SIGNING_SECRET:-}
+      # Allow internal-network digest webhook targets (ADR-055): empty/false =
+      # SSRF-guarded (public only).
+      DIGEST_ALLOW_PRIVATE_WEBHOOKS: ${DIGEST_ALLOW_PRIVATE_WEBHOOKS:-}
+      # Background loop cadence (reaper + recurring scheduler, ADR-033).
+      SCHEDULER_TICK_SECONDS: ${SCHEDULER_TICK_SECONDS:-60}
+      # Traces (ADR-029): empty = disabled.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      # Metrics export cadence (ADR-050); 10s for prompt dev feedback
+      # (the OTel default is 60s). Ignored when telemetry is off.
+      OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-10000}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  agent-api:
+    profiles: ["full"]
+    build: ./agent
+    command: ["uvicorn", "aiagent.adapters.api.app:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      # Metrics export cadence (ADR-050); 10s for prompt dev feedback
+      # (the OTel default is 60s). Ignored when telemetry is off.
+      OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-10000}
+    ports:
+      - "8001:8001"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/healthz')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  agent-worker:
+    profiles: ["full"]
+    build: ./agent
+    command: ["celery", "-A", "aiagent.celery_app", "worker", "--loglevel=info"]
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      BACKEND_INTERNAL_URL: http://backend:8000
+      INTERNAL_API_TOKEN: ${INTERNAL_API_TOKEN:-change-me}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      AGENT_MODEL_ID: ${AGENT_MODEL_ID:-claude-opus-4-8}
+      # "fake" = deterministic keyless providers (e2e / keyless dev, ADR-021).
+      AGENT_PROVIDERS: ${AGENT_PROVIDERS:-live}
+      # Agent orchestrator (ADR-046): "langgraph" (default, Redis checkpointing)
+      # or "loop" (framework-free, ADR-030).
+      AGENT_ORCHESTRATOR: ${AGENT_ORCHESTRATOR:-langgraph}
+      # "anthropic" (hosted) or "ollama" — a model running on the host
+      # (ADR-041); the default base URL points at the host's Ollama.
+      AGENT_LLM_BACKEND: ${AGENT_LLM_BACKEND:-anthropic}
+      AGENT_LLM_BASE_URL: ${AGENT_LLM_BASE_URL:-http://host.docker.internal:11434}
+      # Per-call timeout/retries (ADR-044).
+      AGENT_LLM_TIMEOUT_SECONDS: ${AGENT_LLM_TIMEOUT_SECONDS:-60}
+      AGENT_LLM_MAX_RETRIES: ${AGENT_LLM_MAX_RETRIES:-2}
+      # Spend-tracking rates (ADR-038); set the LLM rates to 0 with a local
+      # backend. Were previously not passed through — the worker silently
+      # priced every run at the defaults.
+      LLM_COST_INPUT_PER_MTOK: ${LLM_COST_INPUT_PER_MTOK:-5.0}
+      LLM_COST_OUTPUT_PER_MTOK: ${LLM_COST_OUTPUT_PER_MTOK:-25.0}
+      SEARCH_COST_PER_CALL: ${SEARCH_COST_PER_CALL:-0.008}
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-}
+      # Metrics export cadence (ADR-050); 10s for prompt dev feedback
+      # (the OTel default is 60s). Ignored when telemetry is off.
+      OTEL_METRIC_EXPORT_INTERVAL: ${OTEL_METRIC_EXPORT_INTERVAL:-10000}
+    # Lets the worker reach the host's Ollama on Linux too (no-op elsewhere).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A aiagent.celery_app inspect ping -d celery@$$HOSTNAME"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  frontend:
+    profiles: ["full"]
+    build: ./frontend
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+  # OTLP entry point (ADR-050): one endpoint the bricks push to; it fans traces
+  # to Jaeger and metrics to Prometheus. Point OTEL_EXPORTER_OTLP_ENDPOINT at
+  # http://otel-collector:4318 (in-compose) or http://localhost:4318 (host).
+  otel-collector:
+    profiles: ["observability"]
+    image: otel/opentelemetry-collector-contrib:0.119.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./deploy/observability/otel-collector.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318" # OTLP/HTTP (also for bricks running on the host)
+    depends_on:
+      - jaeger
+
+  # Local trace backend (ADR-029): Jaeger v2 serves its UI on :16686 and receives
+  # traces from the collector over the compose network. Dev-only.
+  jaeger:
+    profiles: ["observability"]
+    image: jaegertracing/jaeger:2.19.0
+    ports:
+      - "16686:16686" # UI
+
+  # Metrics store (ADR-050): scrapes the collector's Prometheus endpoint.
+  prometheus:
+    profiles: ["observability"]
+    image: prom/prometheus:v3.1.0
+    volumes:
+      - ./deploy/observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090" # UI
+
+  # Metrics dashboards (ADR-050): Prometheus datasource + an "AI agent overview"
+  # dashboard provisioned at startup (see deploy/observability/). Anonymous
+  # admin, dev-only. Extend it with the PromQL in docs/OBSERVABILITY.md.
+  grafana:
+    profiles: ["observability"]
+    image: grafana/grafana:11.4.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Admin"
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+    volumes:
+      - ./deploy/observability/grafana-datasource.yml:/etc/grafana/provisioning/datasources/prometheus.yml:ro
+      - ./deploy/observability/grafana-dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
+      - ./deploy/observability/grafana-dashboard.json:/var/lib/grafana/dashboards/aiagent-overview.json:ro
+    ports:
+      - "3001:3000" # UI (3001 to avoid clashing with a local dev server)
+    depends_on:
+      - prometheus
+
+  # Celery monitoring console (ADR-040): live view of the agent workers,
+  # queued/running/failed tasks and retries, straight from the Redis broker.
+  # Dev-only, like Jaeger — the workbench links to it (http://localhost:5555).
+  flower:
+    profiles: ["observability"]
+    image: mher/flower:2.0
+    command: ["celery", "--broker=redis://redis:6379/0", "flower", "--port=5555"]
+    ports:
+      - "5555:5555"
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  pgdata:
