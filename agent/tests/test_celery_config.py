@@ -32,8 +32,11 @@ def test_ollama_backend_does_not_require_the_anthropic_key(monkeypatch) -> None:
     _check_required_env()  # must not raise
 
 
-def test_anthropic_backend_still_requires_its_key(monkeypatch) -> None:
-    import pytest
+def test_a_missing_llm_key_warns_but_still_starts(monkeypatch, caplog) -> None:
+    """ADR-060: the LLM only authors explanation prose. Scanning, risk
+    classification and revocation are deterministic, so a missing key must
+    degrade the writing — never stop the worker from protecting a wallet."""
+    import logging
 
     from aiagent.celery_app import _check_required_env
 
@@ -41,8 +44,11 @@ def test_anthropic_backend_still_requires_its_key(monkeypatch) -> None:
     monkeypatch.setenv("AGENT_LLM_BACKEND", "anthropic")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.setenv("KEEPERHUB_API_KEY", "kh_key")
-    with pytest.raises(SystemExit):
-        _check_required_env()
+
+    with caplog.at_level(logging.WARNING):
+        _check_required_env()  # must not raise
+
+    assert "ANTHROPIC_API_KEY is not set" in caplog.text
 
 
 def test_missing_keeperhub_key_fails_fast_even_with_ollama(monkeypatch) -> None:

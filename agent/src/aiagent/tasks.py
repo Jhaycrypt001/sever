@@ -1,6 +1,7 @@
 """Celery tasks: thin glue wiring adapters into the use case (no business logic)."""
 
 import logging
+import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
@@ -44,23 +45,43 @@ def _agent_checkpointer(settings: Settings) -> "Iterator[BaseCheckpointSaver[Any
         yield checkpointer
 
 
+def llm_is_configured(settings: Settings) -> bool:
+    """Whether a language model can actually be reached (ADR-060). Ollama runs
+    locally and needs no credential; the hosted backend needs its key. When
+    this is False the pipeline still runs end to end — tier classification and
+    revocation never depended on a model — with templated explanations."""
+    if settings.llm_backend == "ollama":
+        return True
+    return bool(os.environ.get("ANTHROPIC_API_KEY"))
+
+
 def build_providers(
     settings: Settings, meter: UsageMeter | None = None
 ) -> tuple[ApprovalSource, ThreatIntel]:
-    """Selects the provider adapters (ADR-021): live (GoPlus + Claude) by
-    default, deterministic fakes with `AGENT_PROVIDERS=fake`. The meter
-    records spend (ADR-038)."""
+    """Selects the provider adapters (ADR-021/060): GoPlus plus either the
+    LLM explainer or the keyless deterministic one, or the fakes with
+    `AGENT_PROVIDERS=fake`. The meter records spend (ADR-038)."""
     if settings.providers == "fake":
         from aiagent.adapters.fake import FakeApprovalSource, FakeThreatIntel
 
         return FakeApprovalSource(meter), FakeThreatIntel(meter)
 
-    from aiagent.adapters.chat_model import make_chat_model, make_fallback_chat_models
     from aiagent.adapters.goplus import GoPlusApprovalSource
+
+    source = GoPlusApprovalSource(meter=meter, api_key=settings.goplus_api_key)
+
+    if not llm_is_configured(settings):
+        # ADR-060: real data, real tiers, real revocations, templated prose.
+        from aiagent.adapters.deterministic import DeterministicThreatIntel
+
+        logger.info("no LLM configured: using deterministic explanations")
+        return source, DeterministicThreatIntel(meter)
+
+    from aiagent.adapters.chat_model import make_chat_model, make_fallback_chat_models
     from aiagent.adapters.llm import LlmThreatIntel
 
     return (
-        GoPlusApprovalSource(meter=meter, api_key=settings.goplus_api_key),
+        source,
         LlmThreatIntel(
             make_chat_model(settings, max_tokens=256),
             meter=meter,
@@ -72,11 +93,19 @@ def build_providers(
 
 
 def build_policy(settings: Settings, meter: UsageMeter | None = None) -> AgentPolicy:
-    """Selects the decision-maker of the agentic loop (ADR-030/058)."""
+    """Selects the decision-maker of the agentic loop (ADR-030/058/060)."""
     if settings.providers == "fake":
         from aiagent.adapters.fake import FakeAgentPolicy
 
         return FakeAgentPolicy(meter)
+
+    if not llm_is_configured(settings):
+        # Agent mode without a model cannot choose *which* chain to prioritize,
+        # so it covers all of them and says so in the journal (ADR-060).
+        from aiagent.adapters.deterministic import DeterministicAgentPolicy
+
+        logger.info("no LLM configured: agent mode scans every configured chain in order")
+        return DeterministicAgentPolicy(settings.scan_chain_ids, meter)
 
     from aiagent.adapters.chat_model import make_chat_model, make_fallback_chat_models
     from aiagent.adapters.llm import LlmAgentPolicy

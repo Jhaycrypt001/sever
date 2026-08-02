@@ -79,16 +79,50 @@ def test_task_defaults_the_correlation_id_to_the_job_id(fake_env) -> None:
 @respx.mock
 def test_misconfiguration_is_reported_as_a_failed_job_and_raises(fake_env, monkeypatch) -> None:
     monkeypatch.setenv("AGENT_PROVIDERS", "live")
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-present")
+    monkeypatch.setenv("AGENT_LLM_BACKEND", "not-a-backend")
     failure = respx.post(f"{BACKEND}/internal/jobs/job-3/failure").mock(
         return_value=httpx.Response(204)
     )
 
-    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
+    with pytest.raises(ValueError, match="unknown AGENT_LLM_BACKEND"):
         run_scan_task("job-3", "0xwallet")
 
     assert failure.called
     assert b"agent misconfigured" in failure.calls.last.request.content
+
+
+def test_a_missing_llm_key_degrades_instead_of_failing_the_job(fake_env, monkeypatch) -> None:
+    """ADR-060: the LLM only writes prose. Without a key the worker must still
+    scan, classify and revoke — a lapsed billing account cannot be allowed to
+    leave a wallet unprotected."""
+    from aiagent.adapters.deterministic import DeterministicAgentPolicy, DeterministicThreatIntel
+    from aiagent.config import Settings
+    from aiagent.tasks import build_policy, build_providers
+
+    monkeypatch.setenv("AGENT_PROVIDERS", "live")
+    monkeypatch.setenv("AGENT_LLM_BACKEND", "anthropic")
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    settings = Settings.from_env()
+
+    _, threat_intel = build_providers(settings)
+    assert isinstance(threat_intel, DeterministicThreatIntel)
+    assert isinstance(build_policy(settings), DeterministicAgentPolicy)
+
+
+def test_a_present_llm_key_still_selects_the_llm_adapters(fake_env, monkeypatch) -> None:
+    from aiagent.adapters.llm import LlmAgentPolicy, LlmThreatIntel
+    from aiagent.config import Settings
+    from aiagent.tasks import build_policy, build_providers
+
+    monkeypatch.setenv("AGENT_PROVIDERS", "live")
+    monkeypatch.setenv("AGENT_LLM_BACKEND", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-present")
+    settings = Settings.from_env()
+
+    _, threat_intel = build_providers(settings)
+    assert isinstance(threat_intel, LlmThreatIntel)
+    assert isinstance(build_policy(settings), LlmAgentPolicy)
 
 
 @respx.mock

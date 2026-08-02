@@ -1,7 +1,5 @@
 """Fake providers and provider selection (ADR-021/058)."""
 
-import pytest
-
 from aiagent.adapters.fake import (
     FakeAgentPolicy,
     FakeApprovalRevoker,
@@ -61,12 +59,20 @@ def test_build_providers_selects_fakes() -> None:
     assert isinstance(threat_intel, FakeThreatIntel)
 
 
-def test_build_providers_live_requires_credentials(monkeypatch) -> None:
-    """The live path still fails fast without keys (covered by ADR-020 at
-    worker startup; this guards the factory itself)."""
+def test_build_providers_live_without_an_llm_key_uses_the_deterministic_explainer(
+    monkeypatch,
+) -> None:
+    """ADR-060: no key means templated explanations, not a broken pipeline.
+    The approval source stays the real GoPlus adapter either way — only the
+    prose degrades, never the scanning or the risk classification."""
+    from aiagent.adapters.deterministic import DeterministicThreatIntel
+    from aiagent.adapters.goplus import GoPlusApprovalSource
+
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
-        build_providers(settings_with("live"))
+    source, threat_intel = build_providers(settings_with("live"))
+
+    assert isinstance(source, GoPlusApprovalSource)
+    assert isinstance(threat_intel, DeterministicThreatIntel)
 
 
 def test_build_revoker_selects_the_fake() -> None:

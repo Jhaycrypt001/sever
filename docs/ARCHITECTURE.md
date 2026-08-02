@@ -2045,6 +2045,55 @@ would otherwise have missed — three test address constants were 38 hex
 characters instead of 40, and had been silently skipping because the suite
 short-circuits without `DATABASE_URL`.
 
+### ADR-060 — The protection does not depend on a language model (decided 2026-08-02, revisits ADR-009/020/041)
+
+**Context**: the audit above ended on a question the code answered badly.
+With `AGENT_PROVIDERS=live` and no `ANTHROPIC_API_KEY`, the worker **refused to
+start at all** (ADR-020 fail-fast). Tracing what the model actually does made
+that look indefensible: the LLM writes the `explanation` string and, in agent
+mode, picks which chain to scan next. It does **not** decide the risk tier —
+`classify_risk` does (ADR-058) — and it does not execute anything — KeeperHub
+does. So the entire safety-critical path, *fetch approvals → classify →
+revoke the dangerous ones*, never needed a model, yet a missing or expired API
+key left a wallet completely unprotected. An Anthropic outage or a lapsed card
+became a security incident.
+
+**Decision**: keep the LLM as an upgrade to the writing, never a dependency of
+the protection.
+
+1. **`DeterministicThreatIntel`** (`adapters/deterministic.py`): a real
+   `ThreatIntel` with no model behind it. Same real GoPlus data, same
+   `classify_risk` tier, explanation composed from the signals that produced
+   that tier (the reported behaviours, whether source is published, whether
+   the allowance is unlimited, the contradictory-trust case). It states only
+   what the data supports.
+2. **`DeterministicAgentPolicy`**: walks every configured chain in order, then
+   finishes. Without a model there is no basis to prioritise one chain, so it
+   covers all of them and the journal says exactly that rather than implying a
+   judgement nobody made. It never asks a clarification — there would be no
+   model to interpret the answer, and the job would sit in `awaiting_input`
+   forever (ADR-032).
+3. **Selection is automatic** (`llm_is_configured`): Ollama needs no
+   credential; the hosted backend needs its key. Missing key → deterministic
+   adapters, plus one warning line naming precisely what degrades. The worker
+   startup check now hard-requires only `KEEPERHUB_API_KEY`, because a worker
+   that cannot revoke is genuinely useless for this agent.
+4. **These are not the ADR-021 fakes and must never be confused with them.**
+   `adapters/fake.py` fabricates approvals and returns invented transaction
+   hashes; it exists for keyless e2e and is refused in production (ADR-059).
+   `adapters/deterministic.py` touches the real chain, classifies real risk and
+   drives real revocations — the *only* difference from the LLM path is prose
+   quality. That is why it ships as a production adapter rather than a test
+   double, and why its spend is honestly metered at zero LLM calls (ADR-038).
+
+Proven end to end against live mainnet data with no API key present: real
+GoPlus responses for two funded wallets, correct tiers, and the auto-revoke
+gate correctly selecting nothing on verified spenders.
+
+**Consequence**: the product now runs on a KeeperHub key alone. An LLM key
+buys better explanations and smarter chain ordering — never the difference
+between a protected and an unprotected wallet.
+
 ---
 
 ## 4. API contracts (summary)

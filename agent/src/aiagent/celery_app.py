@@ -1,5 +1,6 @@
 """Celery application (broker + result backend on Redis, ADR-004)."""
 
+import logging
 import os
 from typing import Any
 
@@ -39,10 +40,20 @@ def _check_required_env(**_kwargs: Any) -> None:
     cannot execute a revocation is misconfigured for agent mode, whichever job
     arrives first."""
     if os.environ.get("AGENT_PROVIDERS", "live") != "fake":
-        keys = ["KEEPERHUB_API_KEY"]
-        if os.environ.get("AGENT_LLM_BACKEND", "anthropic") == "anthropic":
-            keys.append("ANTHROPIC_API_KEY")
-        require_env("agent-worker", *keys)
+        # KeeperHub is the only hard requirement: a worker that cannot execute
+        # a revocation is useless for this agent, whichever job arrives first.
+        require_env("agent-worker", "KEEPERHUB_API_KEY")
+        # The LLM is not required (ADR-060). It only authors explanation prose;
+        # scanning, risk classification and revocation are all deterministic, so
+        # a missing key degrades the writing rather than the protection.
+        if os.environ.get("AGENT_LLM_BACKEND", "anthropic") == "anthropic" and not os.environ.get(
+            "ANTHROPIC_API_KEY"
+        ):
+            logging.getLogger(__name__).warning(
+                "ANTHROPIC_API_KEY is not set: findings will carry templated "
+                "explanations and agent mode will scan every configured chain "
+                "in order. Risk classification and revocation are unaffected."
+            )
     forbid_placeholders("agent-worker", "INTERNAL_API_TOKEN")
     # ADR-058: never let a deployment claim revocations it did not broadcast.
     forbid_non_executing_modes("agent-worker")
