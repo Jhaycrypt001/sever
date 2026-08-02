@@ -18,6 +18,10 @@ agent/.ruff_cache/
 frontend/node_modules/
 frontend/dist/
 frontend/coverage/
+web/node_modules/
+web/.next/
+web/out/
+web/next-env.d.ts
 
 # Playwright (ADR-028)
 frontend/test-results/

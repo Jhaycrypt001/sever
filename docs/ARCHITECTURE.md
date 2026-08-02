@@ -42,7 +42,7 @@ Three components in a monorepo:
 aiagent_boilerplate/
 ├── backend/     # Rust / Axum — web API, accounts, job orchestration
 ├── agent/       # Python — FastAPI micro-API + Celery workers (LangChain)
-├── frontend/    # Vue 3 / Vite — simple SPA
+├── web/         # Next.js 16 — public page (/) + operator console (/console)
 ├── docs/        # This document + future ADRs
 └── docker-compose.yml   # PostgreSQL, Redis, services
 ```
@@ -50,7 +50,7 @@ aiagent_boilerplate/
 ### Nominal flow
 
 ```
-Vue (SPA)
+Next.js console
   │  POST /api/searches {wallet_address}   (JWT)
   ▼
 Axum (Rust) ── persists the job (PostgreSQL, status=pending)
@@ -2096,9 +2096,55 @@ between a protected and an unprotected wallet.
 
 ---
 
+### ADR-061 — One frontend: Next.js `web/` replaces the Vue `frontend/` (decided 2026-08-02, revisits ADR-003/026/028/049)
+
+**Context**: ADR-058 renamed the domain from "web research" to "approval
+scanning" across the API. The Vue SPA in `frontend/` was never migrated: it
+still posts `{keyword}` to `POST /api/searches` and renders `published_at` /
+`date_confidence` on results that no longer carry those fields. It does not
+merely look wrong — it cannot complete a single scan against the current
+backend. Meanwhile the product needs a public page that explains what an
+approval is and why an unrevoked one is dangerous, which the SPA never had.
+
+**Decision**: one Next.js 16 application in `web/` serves both surfaces, and
+the Vue app is retired rather than repaired.
+
+1. **Two surfaces, one app.** `/` is the public page — what the product does,
+   the classifier, the real Sepolia transaction. `/console` is the operator
+   surface — sign in, launch a scan, watch findings arrive, read the revocation
+   receipts. A visitor who has never heard of an approval and an operator
+   watching a live revoke want different pages; splitting them lets each be
+   honest about its job.
+2. **Why replace and not port.** Porting means rewriting every view, store and
+   test in `frontend/` against a domain that changed underneath them, to end up
+   with a second toolchain to keep alive for a hackathon deadline. The Vue app
+   carried no logic worth saving — the risk decision lives in the worker
+   (ADR-058) and the audit trail in Postgres. What it did prove (SSE-first with
+   polling fallback — ADR-026; the pinned wire shape — ADR-049) is carried over
+   as behaviour, not code.
+3. **The backend contract does not move.** `web/` speaks the same routes with
+   the same shapes; no endpoint was added, removed or reshaped for it. The
+   contract fixtures (ADR-049) stay the arbiter of the wire shape, so a
+   frontend rewrite cannot quietly redefine the API.
+4. **Truthful status rendering is a hard requirement.** `simulated` renders as
+   *not yet revoked* and never borrows the language or colour of `revoked`
+   (ADR-059). Only a finding with `revocation_status: "revoked"` and a
+   `revocation_tx_hash` shows as neutralised, and it links to the block
+   explorer so the claim is checkable without trusting the UI.
+5. **No fabricated proof on the public page.** The template this page was built
+   from shipped a customer-logo wall (IBM, Netflix, Stripe…) and three invented
+   testimonials with stock portraits. All of it is removed. Everything the page
+   asserts — the transaction hash, the gas figure, the classifier source — is
+   sourced from `web/lib/proof.ts` and independently verifiable.
+
+**Consequence**: `frontend/` is deleted; docker-compose, nginx and CI build
+`web/`. The Playwright suite (ADR-028) is rewritten against the new routes.
+
+---
+
 ## 4. API contracts (summary)
 
-### Public (Vue → Rust)
+### Public (Next.js → Rust)
 
 | Method | Route | Description |
 |---|---|---|
