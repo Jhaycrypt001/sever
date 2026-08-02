@@ -34,9 +34,12 @@ def _check_required_env(**_kwargs: Any) -> None:
     runtime — refuse to start instead. Fires only in the worker process, so the
     FastAPI container (which needs no provider key) is unaffected. With fake
     providers (ADR-021) no key is needed at all; with a local LLM backend
-    (ADR-041) only the search key remains required."""
+    (ADR-041) the Anthropic key drops out. GoPlus works keyless (rate-limited),
+    so it is never required here (ADR-058); KeeperHub always is — a worker that
+    cannot execute a revocation is misconfigured for agent mode, whichever job
+    arrives first."""
     if os.environ.get("AGENT_PROVIDERS", "live") != "fake":
-        keys = ["TAVILY_API_KEY"]
+        keys = ["KEEPERHUB_API_KEY"]
         if os.environ.get("AGENT_LLM_BACKEND", "anthropic") == "anthropic":
             keys.append("ANTHROPIC_API_KEY")
         require_env("agent-worker", *keys)

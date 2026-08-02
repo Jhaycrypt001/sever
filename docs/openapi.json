@@ -188,7 +188,7 @@
         },
         "responses": {
           "201": {
-            "description": "Recurring search created",
+            "description": "Recurring scan created",
             "content": {
               "application/json": {
                 "schema": {
@@ -198,7 +198,7 @@
             }
           },
           "422": {
-            "description": "Invalid keyword or interval",
+            "description": "Invalid wallet address or interval",
             "content": {
               "application/json": {
                 "schema": {
@@ -208,7 +208,7 @@
             }
           },
           "429": {
-            "description": "Too many recurring searches",
+            "description": "Too many recurring scans",
             "content": {
               "application/json": {
                 "schema": {
@@ -309,7 +309,7 @@
         },
         "responses": {
           "202": {
-            "description": "Search launched",
+            "description": "Scan launched",
             "content": {
               "application/json": {
                 "schema": {
@@ -319,7 +319,7 @@
             }
           },
           "422": {
-            "description": "Empty keyword",
+            "description": "Invalid wallet address",
             "content": {
               "application/json": {
                 "schema": {
@@ -488,7 +488,7 @@
       },
       "AgentStep": {
         "type": "object",
-        "description": "One decision of the agentic loop (ADR-030), recorded for the live journal.\n`kind` stays an open string (\"search\" / \"finish\" today) so newer agents can\nintroduce step kinds without breaking older backends.",
+        "description": "One decision of the agentic loop (ADR-030/058), recorded for the live\njournal. `kind` stays an open string (\"scan\" / \"finish\" / \"revoke\" /\n\"report\" today) so newer agents can introduce step kinds without breaking\nolder backends.",
         "required": [
           "seq",
           "kind",
@@ -526,10 +526,73 @@
           }
         }
       },
+      "ApprovalFinding": {
+        "type": "object",
+        "required": [
+          "chain_id",
+          "token_address",
+          "token_symbol",
+          "spender_address",
+          "approved_amount",
+          "tier"
+        ],
+        "properties": {
+          "approved_amount": {
+            "type": "string"
+          },
+          "chain_id": {
+            "type": "string"
+          },
+          "explanation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "is_new": {
+            "type": "boolean",
+            "description": "False when a recurring run already saw this exact (chain, token,\nspender) approval (ADR-033); one-shot scans leave every finding new.\nDefault keeps older payloads working."
+          },
+          "malicious_behavior": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "raw": {},
+          "revocation_status": {
+            "$ref": "#/components/schemas/RevocationStatus"
+          },
+          "revocation_tx_hash": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "spender_address": {
+            "type": "string"
+          },
+          "spender_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tier": {
+            "$ref": "#/components/schemas/RiskTier"
+          },
+          "token_address": {
+            "type": "string"
+          },
+          "token_symbol": {
+            "type": "string"
+          }
+        }
+      },
       "CreateRecurringRequest": {
         "type": "object",
         "required": [
-          "keyword",
+          "wallet_address",
           "interval_minutes"
         ],
         "properties": {
@@ -538,11 +601,11 @@
             "format": "int32",
             "minimum": 0
           },
-          "keyword": {
-            "type": "string"
-          },
           "mode": {
             "$ref": "#/components/schemas/JobMode"
+          },
+          "wallet_address": {
+            "type": "string"
           },
           "webhook_url": {
             "type": [
@@ -556,14 +619,14 @@
       "CreateSearchRequest": {
         "type": "object",
         "required": [
-          "keyword"
+          "wallet_address"
         ],
         "properties": {
-          "keyword": {
-            "type": "string"
-          },
           "mode": {
             "$ref": "#/components/schemas/JobMode"
+          },
+          "wallet_address": {
+            "type": "string"
           }
         }
       },
@@ -582,14 +645,6 @@
           }
         }
       },
-      "DateConfidence": {
-        "type": "string",
-        "enum": [
-          "high",
-          "medium",
-          "unknown"
-        ]
-      },
       "ErrorResponse": {
         "type": "object",
         "description": "`{ \"error\": \"…\" }` — the uniform error body (ADR-018).",
@@ -601,20 +656,6 @@
             "type": "string"
           }
         }
-      },
-      "EventType": {
-        "type": "string",
-        "description": "Coarse classification of what a result reports, shown as a badge on the\nfrontend timeline (ADR-027).",
-        "enum": [
-          "announcement",
-          "release",
-          "funding",
-          "legal",
-          "incident",
-          "research",
-          "opinion",
-          "other"
-        ]
       },
       "JobCreatedResponse": {
         "type": "object",
@@ -644,7 +685,7 @@
               "results": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/components/schemas/SearchResult"
+                  "$ref": "#/components/schemas/ApprovalFinding"
                 }
               },
               "steps": {
@@ -660,7 +701,7 @@
       },
       "JobMode": {
         "type": "string",
-        "description": "How the research runs (ADR-030): the fixed pipeline, or the agentic loop\nwhere the LLM policy decides the queries and when to stop. The default\nkeeps pre-ADR-030 clients and payloads working unchanged.",
+        "description": "How the scan runs (ADR-030/058): the fixed pipeline, or the agentic loop\nwhere the LLM policy decides which chains to scan, when to stop, and\n(agent mode only) auto-revokes DANGEROUS-tier approvals afterward. The\ndefault keeps pre-ADR-058 clients and payloads working unchanged.",
         "enum": [
           "workflow",
           "agent"
@@ -713,7 +754,7 @@
         "type": "object",
         "required": [
           "id",
-          "keyword",
+          "wallet_address",
           "mode",
           "status",
           "usage",
@@ -747,9 +788,6 @@
             "type": "string",
             "format": "uuid"
           },
-          "keyword": {
-            "type": "string"
-          },
           "mode": {
             "$ref": "#/components/schemas/JobMode"
           },
@@ -771,6 +809,9 @@
           },
           "usage": {
             "$ref": "#/components/schemas/JobUsage"
+          },
+          "wallet_address": {
+            "type": "string"
           }
         }
       },
@@ -778,7 +819,7 @@
         "type": "object",
         "required": [
           "id",
-          "keyword",
+          "wallet_address",
           "mode",
           "interval_minutes",
           "created_at"
@@ -797,9 +838,6 @@
             "format": "int32",
             "minimum": 0
           },
-          "keyword": {
-            "type": "string"
-          },
           "last_run_at": {
             "type": [
               "string",
@@ -810,6 +848,9 @@
           "mode": {
             "$ref": "#/components/schemas/JobMode"
           },
+          "wallet_address": {
+            "type": "string"
+          },
           "webhook_url": {
             "type": [
               "string",
@@ -818,49 +859,24 @@
           }
         }
       },
-      "SearchResult": {
-        "type": "object",
-        "required": [
-          "title",
-          "url",
-          "snippet",
-          "date_confidence"
-        ],
-        "properties": {
-          "date_confidence": {
-            "$ref": "#/components/schemas/DateConfidence"
-          },
-          "event_type": {
-            "$ref": "#/components/schemas/EventType"
-          },
-          "is_new": {
-            "type": "boolean",
-            "description": "False when a recurring run already saw this URL (ADR-033); one-shot\nsearches leave every result new. Default keeps older payloads working."
-          },
-          "published_at": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "format": "date-time"
-          },
-          "raw": {},
-          "snippet": {
-            "type": "string"
-          },
-          "summary": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "title": {
-            "type": "string"
-          },
-          "url": {
-            "type": "string"
-          }
-        }
+      "RevocationStatus": {
+        "type": "string",
+        "description": "What happened when a DANGEROUS-tier approval was sent for revocation\n(ADR-058).",
+        "enum": [
+          "not_attempted",
+          "pending",
+          "revoked",
+          "failed"
+        ]
+      },
+      "RiskTier": {
+        "type": "string",
+        "description": "How dangerous an outstanding approval is judged to be (ADR-058).\n\nDeliberately a closed, deterministic vocabulary rather than a free-form\nLLM score: the agent's `classify_risk` (not an LLM) assigns the tier from\nverified threat-intel signals, and the tier alone decides whether an\napproval is auto-revoked or left for the user. The backend never assigns\nor changes a tier — it only stores and re-serves what the agent decided.",
+        "enum": [
+          "safe",
+          "watch",
+          "dangerous"
+        ]
       }
     },
     "securitySchemes": {
@@ -878,11 +894,11 @@
     },
     {
       "name": "searches",
-      "description": "Launch and read searches (ADR-030/032)"
+      "description": "Launch and read approval scans (ADR-030/032/058)"
     },
     {
       "name": "recurring",
-      "description": "Scheduled recurring searches (ADR-033)"
+      "description": "Scheduled recurring scans (ADR-033)"
     }
   ]
 }

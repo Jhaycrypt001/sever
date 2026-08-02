@@ -6,7 +6,6 @@ the Rust dispatcher produces must parse).
 """
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 
 from aiagent.adapters.api.app import TaskRequest
@@ -14,9 +13,9 @@ from aiagent.adapters.sink import serialize_result, serialize_step, serialize_us
 from aiagent.domain.models import (
     AgentStep,
     AgentStepKind,
-    DateConfidence,
-    EventType,
-    ResearchResult,
+    ApprovalFinding,
+    RevocationStatus,
+    RiskTier,
 )
 from aiagent.domain.usage import Pricing, Usage
 
@@ -24,39 +23,53 @@ CONTRACTS = Path(__file__).parents[2] / "contracts"
 
 
 def load(name: str) -> dict:
-    return json.loads((CONTRACTS / name).read_text())
+    # Explicit encoding (not the platform default): Path.read_text() without
+    # one falls back to locale.getpreferredencoding(), which is cp1252 on a
+    # default Windows setup — silently corrupting any non-ASCII fixture byte
+    # (e.g. an em dash) instead of reading the UTF-8 the file actually is.
+    return json.loads((CONTRACTS / name).read_text(encoding="utf-8"))
 
 
 def test_agent_produces_the_results_callback_exactly() -> None:
     results = [
-        ResearchResult(
-            title="provider-dated",
-            url="https://example.com/provider-dated",
-            snippet="Date supplied by the search provider",
-            published_at=datetime(2026, 5, 1, tzinfo=UTC),
-            date_confidence=DateConfidence.HIGH,
-            event_type=EventType.RELEASE,
-            summary="Version 2.0 was released with breaking changes.",
+        ApprovalFinding(
+            chain_id="1",
+            token_address="0x1111111111111111111111111111111111111a",
+            token_symbol="USDC",
+            spender_address="0xbad000000000000000000000000000000bad00",
+            spender_name="Suspicious Proxy",
+            approved_amount="Unlimited",
+            tier=RiskTier.DANGEROUS,
+            malicious_behavior=("phishing_activities",),
+            explanation="This spender is a known malicious contract with an unlimited approval.",
+            revocation_status=RevocationStatus.REVOKED,
+            revocation_tx_hash="0xabc123",
             raw={"provider": "fixture"},
         ),
-        ResearchResult(
-            title="llm-dated",
-            url="https://example.com/llm-dated",
-            snippet="Date extracted by the LLM",
-            published_at=datetime(2025, 8, 20, 9, 30, tzinfo=UTC),
-            date_confidence=DateConfidence.MEDIUM,
-            event_type=EventType.FUNDING,
-            summary="The company raised a Series A round.",
+        ApprovalFinding(
+            chain_id="8453",
+            token_address="0x2222222222222222222222222222222222222b",
+            token_symbol="WETH",
+            spender_address="0xca1100000000000000000000000000000ca110",
+            spender_name=None,
+            approved_amount="1000",
+            tier=RiskTier.WATCH,
+            malicious_behavior=(),
+            explanation=(
+                "This spender contract is unverified — not confirmed malicious, but "
+                "unable to audit."
+            ),
             raw={"provider": "fixture"},
         ),
-        ResearchResult(
-            title="undated",
-            url="https://example.com/undated",
-            snippet="No publication date could be determined",
-            published_at=None,
-            date_confidence=DateConfidence.UNKNOWN,
-            event_type=EventType.OTHER,
-            summary=None,
+        ApprovalFinding(
+            chain_id="1",
+            token_address="0x3333333333333333333333333333333333333c",
+            token_symbol="DAI",
+            spender_address="0x5afe000000000000000000000000000005afe0",
+            spender_name="Well-Known Router",
+            approved_amount="50",
+            tier=RiskTier.SAFE,
+            explanation="This spender is a verified, low-risk contract.",
             raw={"provider": "fixture"},
         ),
     ]
@@ -76,15 +89,15 @@ def test_agent_produces_the_failure_callback_shape() -> None:
 def test_agent_consumes_the_task_request_produced_by_the_backend() -> None:
     request = TaskRequest(**load("task-request.json"))
     assert request.job_id == "3fa85f64-5717-4562-b3fc-2c963f66afa6"
-    assert request.keyword == "rust hexagonal architecture"
+    assert request.wallet_address == "0x1234567890123456789012345678901234567890"
 
 
 def test_agent_produces_the_step_callback_exactly() -> None:
     step = AgentStep(
         seq=1,
-        kind=AgentStepKind.SEARCH,
-        detail="rust hexagonal architecture",
-        reason="Start with the user's goal as the query",
+        kind=AgentStepKind.SCAN,
+        detail="1",
+        reason="Start with Ethereum mainnet",
         new_hits=4,
     )
     assert serialize_step(step) == load("agent-step-callback.json")
@@ -104,7 +117,7 @@ def test_agent_consumes_the_task_request_recurring_memory() -> None:
     request = TaskRequest(**load("task-request.json"))
     # One-shot dispatch (ADR-033): not a recurring run, no memory.
     assert request.recurring is False
-    assert request.seen_urls == []
+    assert request.seen_approval_keys == []
 
 
 def test_agent_produces_the_question_callback_shape() -> None:

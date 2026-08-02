@@ -6,7 +6,7 @@ models whose structured output is a real `RunnableLambda`, so the actual
 from langchain_core.runnables import RunnableLambda
 
 from aiagent.adapters.llm import ActionReply, LlmAgentPolicy, structured_with_fallbacks
-from aiagent.domain.models import SearchAction
+from aiagent.domain.models import ScanAction
 
 
 class _Raw:
@@ -48,10 +48,10 @@ def test_secondary_model_is_used_when_the_primary_errors() -> None:
 
 
 def test_policy_adapter_falls_back_to_the_secondary_model() -> None:
-    reply = ActionReply(action="search", query="q", reason="r")
+    reply = ActionReply(action="scan", chain_id="1", reason="r")
     policy = LlmAgentPolicy(
         FakeModel(error=RuntimeError("primary down")),  # type: ignore[arg-type]
         fallbacks=[FakeModel(reply=reply)],  # type: ignore[list-item]
     )
     action = policy.decide("goal", [], [])
-    assert isinstance(action, SearchAction) and action.query == "q"
+    assert isinstance(action, ScanAction) and action.chain_id == "1"

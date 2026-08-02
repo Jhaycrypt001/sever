@@ -2,7 +2,7 @@
 //!
 //! Covers lost Celery messages, dead workers, and unreachable callbacks — the
 //! cases where no `/internal/jobs/{id}/...` notification will ever arrive. A
-//! late completion still overwrites the timeout failure (see `ResearchJob`).
+//! late completion still overwrites the timeout failure (see `ScanJob`).
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,11 +45,13 @@ mod tests {
     use super::*;
     use crate::adapters::persistence::in_memory::InMemoryJobRepository;
     use crate::domain::ports::JobRepository;
-    use crate::domain::{JobStatus, ResearchJob};
+    use crate::domain::{JobStatus, ScanJob};
     use uuid::Uuid;
 
-    fn job_created_secs_ago(secs: i64) -> ResearchJob {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "keyword").unwrap();
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
+
+    fn job_created_secs_ago(secs: i64) -> ScanJob {
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.created_at = Utc::now() - chrono::Duration::seconds(secs);
         job
     }

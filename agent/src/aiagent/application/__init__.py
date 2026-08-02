@@ -1,4 +1,4 @@
-from aiagent.application.run_agent_research import run_agent_research
-from aiagent.application.run_research import run_research
+from aiagent.application.run_agent_scan import run_agent_scan
+from aiagent.application.run_scan import run_scan
 
-__all__ = ["run_agent_research", "run_research"]
+__all__ = ["run_agent_scan", "run_scan"]

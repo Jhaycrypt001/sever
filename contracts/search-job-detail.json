@@ -4,43 +4,51 @@
   "created_at": "2026-05-01T09:00:00Z",
   "error": null,
   "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
-  "keyword": "rust releases",
+  "wallet_address": "0x1234567890123456789012345678901234567890",
   "mode": "agent",
   "question": null,
   "recurring_search_id": null,
   "results": [
     {
-      "date_confidence": "high",
-      "event_type": "release",
+      "chain_id": "1",
+      "token_address": "0x1111111111111111111111111111111111111a",
+      "token_symbol": "USDC",
+      "spender_address": "0xbad000000000000000000000000000000bad00",
+      "spender_name": "Suspicious Proxy",
+      "approved_amount": "Unlimited",
+      "tier": "dangerous",
+      "malicious_behavior": ["phishing_activities"],
+      "explanation": "This spender is a known malicious contract with an unlimited approval.",
       "is_new": true,
-      "published_at": "2026-05-01T00:00:00Z",
+      "revocation_status": "revoked",
+      "revocation_tx_hash": "0xabc123",
       "raw": {
         "provider": "fixture"
-      },
-      "snippet": "The Rust team announced 1.99.",
-      "summary": "Rust 1.99 ships faster incremental builds.",
-      "title": "Rust 1.99 released",
-      "url": "https://blog.rust-lang.org/rust-1-99"
+      }
     },
     {
-      "date_confidence": "unknown",
-      "event_type": "other",
+      "chain_id": "1",
+      "token_address": "0x3333333333333333333333333333333333333c",
+      "token_symbol": "DAI",
+      "spender_address": "0x5afe000000000000000000000000000005afe0",
+      "spender_name": "Well-Known Router",
+      "approved_amount": "50",
+      "tier": "safe",
+      "malicious_behavior": [],
+      "explanation": "This spender is a verified, low-risk contract.",
       "is_new": false,
-      "published_at": null,
-      "raw": {},
-      "snippet": "No date stated.",
-      "summary": null,
-      "title": "An opinion on boring tech",
-      "url": "https://example.com/boring"
+      "revocation_status": "not_attempted",
+      "revocation_tx_hash": null,
+      "raw": {}
     }
   ],
   "status": "completed",
   "steps": [
     {
-      "detail": "rust 1.99 release",
-      "kind": "search",
+      "detail": "1",
+      "kind": "scan",
       "new_hits": 2,
-      "reason": "start with the goal",
+      "reason": "start with Ethereum mainnet",
       "seq": 1
     },
     {
@@ -49,6 +57,13 @@
       "new_hits": 0,
       "reason": "coverage sufficient",
       "seq": 2
+    },
+    {
+      "detail": "0xbad000000000000000000000000000000bad00",
+      "kind": "revoke",
+      "new_hits": 0,
+      "reason": "auto-revoked: tx 0xabc123",
+      "seq": 3
     }
   ],
   "usage": {

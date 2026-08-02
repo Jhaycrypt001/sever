@@ -1,12 +1,12 @@
-//! Recurring searches (ADR-033): a saved keyword re-run on an interval by the
-//! backend scheduler tick. Each run is an ordinary `ResearchJob` linked back
-//! to its recurring search, so history, results and the journal need nothing
-//! new. Pure domain — the scheduling itself lives in `application`.
+//! Recurring scans (ADR-033): a saved wallet address re-scanned on an
+//! interval by the backend scheduler tick. Each run is an ordinary `ScanJob`
+//! linked back to its recurring search, so history, results and the journal
+//! need nothing new. Pure domain — the scheduling itself lives in `application`.
 
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::job::{JobError, JobMode, MAX_KEYWORD_LEN};
+use super::job::{is_valid_evm_address, JobError, JobMode};
 
 /// Interval bounds: floor guards against tick-speed abuse (every run costs
 /// provider/LLM calls, ADR-017); ceiling is one week.
@@ -21,10 +21,10 @@ pub const MAX_WEBHOOK_URL_LEN: usize = 2_048;
 pub struct RecurringSearch {
     pub id: Uuid,
     pub user_id: Uuid,
-    pub keyword: String,
+    pub wallet_address: String,
     pub mode: JobMode,
     pub interval_minutes: u32,
-    /// Digest target (ADR-036): when set, runs that deliver new results POST
+    /// Digest target (ADR-036): when set, runs that deliver new findings POST
     /// a digest there. None = no notification.
     pub webhook_url: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -34,17 +34,17 @@ pub struct RecurringSearch {
 impl RecurringSearch {
     pub fn new(
         user_id: Uuid,
-        keyword: &str,
+        wallet_address: &str,
         mode: JobMode,
         interval_minutes: u32,
         webhook_url: Option<&str>,
     ) -> Result<Self, JobError> {
-        let keyword = keyword.trim();
-        if keyword.is_empty() {
-            return Err(JobError::EmptyKeyword);
+        let wallet_address = wallet_address.trim();
+        if wallet_address.is_empty() {
+            return Err(JobError::EmptyWalletAddress);
         }
-        if keyword.chars().count() > MAX_KEYWORD_LEN {
-            return Err(JobError::KeywordTooLong);
+        if !is_valid_evm_address(wallet_address) {
+            return Err(JobError::InvalidWalletAddress);
         }
         if !(MIN_INTERVAL_MINUTES..=MAX_INTERVAL_MINUTES).contains(&interval_minutes) {
             return Err(JobError::InvalidInterval);
@@ -62,7 +62,7 @@ impl RecurringSearch {
         Ok(Self {
             id: Uuid::new_v4(),
             user_id,
-            keyword: keyword.to_string(),
+            wallet_address: wallet_address.to_string(),
             mode,
             interval_minutes,
             webhook_url,
@@ -90,17 +90,19 @@ impl RecurringSearch {
 mod tests {
     use super::*;
 
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
+
     #[test]
     fn new_recurring_search_is_due_immediately() {
-        let rs = RecurringSearch::new(Uuid::new_v4(), " rust ", JobMode::Agent, 60, None).unwrap();
-        assert_eq!(rs.keyword, "rust");
+        let rs = RecurringSearch::new(Uuid::new_v4(), ADDR, JobMode::Agent, 60, None).unwrap();
+        assert_eq!(rs.wallet_address, ADDR);
         assert!(rs.is_due(Utc::now()));
     }
 
     #[test]
     fn due_again_only_after_the_interval() {
         let mut rs =
-            RecurringSearch::new(Uuid::new_v4(), "rust", JobMode::Workflow, 60, None).unwrap();
+            RecurringSearch::new(Uuid::new_v4(), ADDR, JobMode::Workflow, 60, None).unwrap();
         let now = Utc::now();
         rs.mark_ran(now);
         assert!(!rs.is_due(now + chrono::Duration::minutes(59)));
@@ -108,19 +110,29 @@ mod tests {
     }
 
     #[test]
-    fn keyword_and_interval_are_validated() {
+    fn wallet_address_and_interval_are_validated() {
         let user = Uuid::new_v4();
         assert_eq!(
             RecurringSearch::new(user, "  ", JobMode::Workflow, 60, None).unwrap_err(),
-            JobError::EmptyKeyword
+            JobError::EmptyWalletAddress
         );
         assert_eq!(
-            RecurringSearch::new(user, "k", JobMode::Workflow, 0, None).unwrap_err(),
+            RecurringSearch::new(user, "not-an-address", JobMode::Workflow, 60, None).unwrap_err(),
+            JobError::InvalidWalletAddress
+        );
+        assert_eq!(
+            RecurringSearch::new(user, ADDR, JobMode::Workflow, 0, None).unwrap_err(),
             JobError::InvalidInterval
         );
         assert_eq!(
-            RecurringSearch::new(user, "k", JobMode::Workflow, MAX_INTERVAL_MINUTES + 1, None)
-                .unwrap_err(),
+            RecurringSearch::new(
+                user,
+                ADDR,
+                JobMode::Workflow,
+                MAX_INTERVAL_MINUTES + 1,
+                None
+            )
+            .unwrap_err(),
             JobError::InvalidInterval
         );
     }
@@ -129,7 +141,7 @@ mod tests {
     fn webhook_url_is_validated_and_optional() {
         let user = Uuid::new_v4();
         let with_hook =
-            RecurringSearch::new(user, "k", JobMode::Agent, 60, Some("https://ex.com/hook"))
+            RecurringSearch::new(user, ADDR, JobMode::Agent, 60, Some("https://ex.com/hook"))
                 .unwrap();
         assert_eq!(
             with_hook.webhook_url.as_deref(),
@@ -137,32 +149,21 @@ mod tests {
         );
 
         // Blank means none; anything that is not http(s) is rejected.
-        let blank = RecurringSearch::new(user, "k", JobMode::Agent, 60, Some("  ")).unwrap();
+        let blank = RecurringSearch::new(user, ADDR, JobMode::Agent, 60, Some("  ")).unwrap();
         assert!(blank.webhook_url.is_none());
         assert_eq!(
-            RecurringSearch::new(user, "k", JobMode::Agent, 60, Some("ftp://x")).unwrap_err(),
+            RecurringSearch::new(user, ADDR, JobMode::Agent, 60, Some("ftp://x")).unwrap_err(),
             JobError::InvalidWebhookUrl
         );
     }
 
     #[test]
-    fn overlong_keyword_and_webhook_url_are_rejected() {
+    fn overlong_webhook_url_is_rejected() {
         // ADR-056: input caps at the domain boundary.
         let user = Uuid::new_v4();
-        assert_eq!(
-            RecurringSearch::new(
-                user,
-                &"k".repeat(MAX_KEYWORD_LEN + 1),
-                JobMode::Agent,
-                60,
-                None
-            )
-            .unwrap_err(),
-            JobError::KeywordTooLong
-        );
         let long_url = format!("https://ex.com/{}", "a".repeat(MAX_WEBHOOK_URL_LEN));
         assert_eq!(
-            RecurringSearch::new(user, "k", JobMode::Agent, 60, Some(&long_url)).unwrap_err(),
+            RecurringSearch::new(user, ADDR, JobMode::Agent, 60, Some(&long_url)).unwrap_err(),
             JobError::WebhookUrlTooLong
         );
     }

@@ -6,7 +6,7 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::{
-    AgentStep, JobUsage, RecurringSearch, RefreshToken, ResearchJob, SearchResult, SecurityEvent,
+    AgentStep, ApprovalFinding, JobUsage, RecurringSearch, RefreshToken, ScanJob, SecurityEvent,
     User,
 };
 
@@ -23,10 +23,10 @@ pub trait UserRepository: Send + Sync {
 
 #[async_trait]
 pub trait JobRepository: Send + Sync {
-    async fn insert(&self, job: &ResearchJob) -> Result<(), PortError>;
-    async fn update(&self, job: &ResearchJob) -> Result<(), PortError>;
-    async fn find(&self, id: Uuid) -> Result<Option<ResearchJob>, PortError>;
-    async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<ResearchJob>, PortError>;
+    async fn insert(&self, job: &ScanJob) -> Result<(), PortError>;
+    async fn update(&self, job: &ScanJob) -> Result<(), PortError>;
+    async fn find(&self, id: Uuid) -> Result<Option<ScanJob>, PortError>;
+    async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<ScanJob>, PortError>;
     /// Number of jobs the user created since `since` — quota input (ADR-017).
     async fn count_created_since(
         &self,
@@ -37,9 +37,13 @@ pub trait JobRepository: Send + Sync {
     async fn list_unfinished_older_than(
         &self,
         cutoff: DateTime<Utc>,
-    ) -> Result<Vec<ResearchJob>, PortError>;
-    async fn store_results(&self, job_id: Uuid, results: &[SearchResult]) -> Result<(), PortError>;
-    async fn results_for(&self, job_id: Uuid) -> Result<Vec<SearchResult>, PortError>;
+    ) -> Result<Vec<ScanJob>, PortError>;
+    async fn store_results(
+        &self,
+        job_id: Uuid,
+        results: &[ApprovalFinding],
+    ) -> Result<(), PortError>;
+    async fn results_for(&self, job_id: Uuid) -> Result<Vec<ApprovalFinding>, PortError>;
     /// Records one decision of the agentic loop (ADR-030). Idempotent on
     /// `(job_id, seq)` so Celery retries never duplicate journal entries.
     async fn append_step(&self, job_id: Uuid, step: &AgentStep) -> Result<(), PortError>;
@@ -50,25 +54,26 @@ pub trait JobRepository: Send + Sync {
     async fn clear_steps(&self, job_id: Uuid) -> Result<(), PortError>;
     /// Accumulates one task attempt's spend onto the job (ADR-038).
     async fn add_usage(&self, job_id: Uuid, usage: &JobUsage) -> Result<(), PortError>;
-    /// URLs already delivered by previous runs of a recurring search — the
-    /// memory the agent receives to flag deltas (ADR-033). Most recent first,
-    /// capped by `limit` to bound the task payload.
-    async fn recent_urls_for_recurring(
+    /// Approval keys (chain:token:spender) already delivered by previous runs
+    /// of a recurring scan — the memory the agent receives to flag deltas
+    /// (ADR-033). Most recent first, capped by `limit` to bound the task
+    /// payload.
+    async fn recent_approval_keys_for_recurring(
         &self,
         recurring_search_id: Uuid,
         limit: u32,
     ) -> Result<Vec<String>, PortError>;
 }
 
-/// Saved searches re-run by the scheduler (ADR-033).
+/// Saved scans re-run by the scheduler (ADR-033).
 #[async_trait]
 pub trait RecurringSearchRepository: Send + Sync {
     async fn insert(&self, search: &RecurringSearch) -> Result<(), PortError>;
     async fn find(&self, id: Uuid) -> Result<Option<RecurringSearch>, PortError>;
     async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<RecurringSearch>, PortError>;
-    /// Deletes the user's recurring search; false when unknown or foreign.
+    /// Deletes the user's recurring scan; false when unknown or foreign.
     async fn delete(&self, user_id: Uuid, id: Uuid) -> Result<bool, PortError>;
-    /// Every recurring search due at `now` (never run, or interval elapsed).
+    /// Every recurring scan due at `now` (never run, or interval elapsed).
     async fn list_due(&self, now: DateTime<Utc>) -> Result<Vec<RecurringSearch>, PortError>;
     async fn mark_ran(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), PortError>;
 }
@@ -102,30 +107,32 @@ pub trait SecurityAudit: Send + Sync {
     async fn delete_before(&self, cutoff: DateTime<Utc>) -> Result<u64, PortError>;
 }
 
-/// Sends a research job to the agent (via the FastAPI micro-API, see ADR-005).
-/// `seen_urls` is the recurring-search memory (ADR-033): URLs delivered by
-/// previous runs, empty for one-shot searches.
+/// Sends a scan job to the agent (via the FastAPI micro-API, see ADR-005).
+/// `seen_approval_keys` is the recurring-scan memory (ADR-033): approval keys
+/// (chain:token:spender) delivered by previous runs, empty for one-shot scans.
 #[async_trait]
 pub trait JobDispatcher: Send + Sync {
-    async fn dispatch(&self, job: &ResearchJob, seen_urls: &[String]) -> Result<(), PortError>;
+    async fn dispatch(&self, job: &ScanJob, seen_approval_keys: &[String])
+        -> Result<(), PortError>;
 }
 
-/// A digest of a recurring run that found something new (ADR-036).
+/// A digest of a recurring run that found something new (ADR-036/058).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct Digest {
     pub recurring_search_id: Uuid,
     pub job_id: Uuid,
-    pub keyword: String,
+    pub wallet_address: String,
     pub new_count: usize,
-    /// The new results only (title/url/published_at), newest first.
+    /// The new findings only, most-dangerous-first.
     pub new_results: Vec<DigestEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DigestEntry {
-    pub title: String,
-    pub url: String,
-    pub published_at: Option<chrono::DateTime<Utc>>,
+    pub token_symbol: String,
+    pub spender_address: String,
+    pub tier: super::RiskTier,
+    pub revocation_status: super::RevocationStatus,
 }
 
 /// Delivers digests (ADR-036) — webhook in this repository; an e-mail sender

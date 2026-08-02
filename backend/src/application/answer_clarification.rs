@@ -8,11 +8,11 @@ use uuid::Uuid;
 
 use crate::domain::job::JobError;
 use crate::domain::ports::{JobDispatcher, JobRepository, PortError};
-use crate::domain::ResearchJob;
+use crate::domain::ScanJob;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AnswerError {
-    #[error("search not found")]
+    #[error("scan not found")]
     NotFound,
     #[error(transparent)]
     InvalidAnswer(#[from] JobError),
@@ -40,7 +40,7 @@ impl AnswerClarification {
         user_id: Uuid,
         job_id: Uuid,
         answer: &str,
-    ) -> Result<ResearchJob, AnswerError> {
+    ) -> Result<ScanJob, AnswerError> {
         let mut job = self
             .jobs
             .find(job_id)
@@ -52,11 +52,15 @@ impl AnswerClarification {
         self.jobs.update(&job).await?;
 
         // A recurring run keeps its memory across the pause (ADR-033).
-        let seen_urls = match job.recurring_search_id {
-            Some(rs_id) => self.jobs.recent_urls_for_recurring(rs_id, 200).await?,
+        let seen_approval_keys = match job.recurring_search_id {
+            Some(rs_id) => {
+                self.jobs
+                    .recent_approval_keys_for_recurring(rs_id, 200)
+                    .await?
+            }
             None => Vec::new(),
         };
-        if let Err(err) = self.dispatcher.dispatch(&job, &seen_urls).await {
+        if let Err(err) = self.dispatcher.dispatch(&job, &seen_approval_keys).await {
             job.fail(format!("dispatch failed: {err}"));
             self.jobs.update(&job).await?;
             return Err(AnswerError::DispatchFailed);
@@ -74,8 +78,10 @@ mod tests {
     use async_trait::async_trait;
     use std::sync::Mutex;
 
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
+
     struct RecordingDispatcher {
-        dispatched: Mutex<Vec<ResearchJob>>,
+        dispatched: Mutex<Vec<ScanJob>>,
         fail: bool,
     }
 
@@ -90,7 +96,7 @@ mod tests {
 
     #[async_trait]
     impl JobDispatcher for RecordingDispatcher {
-        async fn dispatch(&self, job: &ResearchJob, _seen: &[String]) -> Result<(), PortError> {
+        async fn dispatch(&self, job: &ScanJob, _seen: &[String]) -> Result<(), PortError> {
             if self.fail {
                 return Err(PortError("agent unreachable".into()));
             }
@@ -99,17 +105,17 @@ mod tests {
         }
     }
 
-    async fn awaiting_job(jobs: &InMemoryJobRepository) -> ResearchJob {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "jaguar").unwrap();
+    async fn awaiting_job(jobs: &InMemoryJobRepository) -> ScanJob {
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.start();
-        job.request_input("The animal or the car?").unwrap();
+        job.request_input("Which chains should I scan?").unwrap();
         jobs.insert(&job).await.unwrap();
         jobs.append_step(
             job.id,
             &AgentStep {
                 seq: 1,
-                kind: "search".into(),
-                detail: "jaguar".into(),
+                kind: "scan".into(),
+                detail: "1".into(),
                 reason: "r".into(),
                 new_hits: 2,
             },
@@ -127,17 +133,17 @@ mod tests {
         let answer = AnswerClarification::new(jobs.clone(), dispatcher.clone());
 
         let updated = answer
-            .execute(job.user_id, job.id, "the car")
+            .execute(job.user_id, job.id, "ethereum only")
             .await
             .unwrap();
 
         assert_eq!(updated.status, JobStatus::Pending);
-        assert_eq!(updated.answer.as_deref(), Some("the car"));
+        assert_eq!(updated.answer.as_deref(), Some("ethereum only"));
         // The resumed loop writes a fresh journal (replace semantics).
         assert!(jobs.steps_for(job.id).await.unwrap().is_empty());
         // The dispatched job carries the answer for the agent.
         let dispatched = dispatcher.dispatched.lock().unwrap();
-        assert_eq!(dispatched[0].answer.as_deref(), Some("the car"));
+        assert_eq!(dispatched[0].answer.as_deref(), Some("ethereum only"));
     }
 
     #[tokio::test]
@@ -147,7 +153,7 @@ mod tests {
         let answer = AnswerClarification::new(jobs, Arc::new(RecordingDispatcher::ok()));
 
         let err = answer
-            .execute(Uuid::new_v4(), job.id, "the car")
+            .execute(Uuid::new_v4(), job.id, "ethereum only")
             .await
             .unwrap_err();
         assert!(matches!(err, AnswerError::NotFound));
@@ -156,7 +162,7 @@ mod tests {
     #[tokio::test]
     async fn a_job_that_is_not_awaiting_rejects_the_answer() {
         let jobs = Arc::new(InMemoryJobRepository::default());
-        let job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         jobs.insert(&job).await.unwrap();
         let answer = AnswerClarification::new(jobs, Arc::new(RecordingDispatcher::ok()));
 
@@ -181,7 +187,7 @@ mod tests {
         let answer = AnswerClarification::new(jobs.clone(), dispatcher);
 
         let err = answer
-            .execute(job.user_id, job.id, "the car")
+            .execute(job.user_id, job.id, "ethereum only")
             .await
             .unwrap_err();
 

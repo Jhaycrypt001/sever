@@ -18,7 +18,9 @@ use backend::adapters::persistence::in_memory::{
     InMemorySecurityAudit, InMemoryUserRepository,
 };
 use backend::domain::ports::JobDispatcher;
-use backend::domain::{JobMode, ResearchJob};
+use backend::domain::{JobMode, ScanJob};
+
+const ADDR: &str = "0x1234567890123456789012345678901234567890";
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -83,7 +85,7 @@ async fn user_with_job(app: &Router) -> (String, String) {
         app,
         post(
             "/api/searches",
-            r#"{"keyword":"contract"}"#.into(),
+            format!(r#"{{"wallet_address":"{ADDR}"}}"#),
             &[("authorization", &bearer)],
         ),
     )
@@ -134,17 +136,17 @@ async fn backend_consumes_the_results_callback_fixture() {
     .await;
     assert_eq!(detail["status"], "completed");
     let results = detail["results"].as_array().unwrap();
-    let titles: Vec<&str> = results
+    let symbols: Vec<&str> = results
         .iter()
-        .map(|r| r["title"].as_str().unwrap())
+        .map(|r| r["token_symbol"].as_str().unwrap())
         .collect();
-    assert_eq!(titles, vec!["provider-dated", "llm-dated", "undated"]);
-    let confidences: Vec<&str> = results
+    assert_eq!(symbols, vec!["USDC", "WETH", "DAI"]);
+    let tiers: Vec<&str> = results
         .iter()
-        .map(|r| r["date_confidence"].as_str().unwrap())
+        .map(|r| r["tier"].as_str().unwrap())
         .collect();
-    assert_eq!(confidences, vec!["high", "medium", "unknown"]);
-    assert!(results[2]["published_at"].is_null());
+    assert_eq!(tiers, vec!["dangerous", "watch", "safe"]);
+    assert!(results[1]["spender_name"].is_null());
 }
 
 #[tokio::test]
@@ -173,7 +175,10 @@ async fn backend_consumes_the_failure_callback_fixture() {
     )
     .await;
     assert_eq!(detail["status"], "failed");
-    assert!(detail["error"].as_str().unwrap().contains("TAVILY_API_KEY"));
+    assert!(detail["error"]
+        .as_str()
+        .unwrap()
+        .contains("KEEPERHUB_API_KEY"));
 }
 
 #[tokio::test]
@@ -203,7 +208,7 @@ async fn backend_consumes_the_agent_step_callback_fixture() {
     .await;
     let steps = detail["steps"].as_array().unwrap();
     assert_eq!(steps.len(), 1);
-    assert_eq!(steps[0]["kind"], "search");
+    assert_eq!(steps[0]["kind"], "scan");
     assert_eq!(steps[0]["new_hits"], 4);
 }
 
@@ -232,7 +237,7 @@ async fn backend_produces_the_task_request_fixture() {
     tokio::spawn(async move { axum::serve(listener, stub).await.unwrap() });
 
     let dispatcher = HttpJobDispatcher::new(format!("http://{addr}"), "secret".into());
-    let mut job = ResearchJob::new(Uuid::new_v4(), "rust hexagonal architecture")
+    let mut job = ScanJob::new(Uuid::new_v4(), ADDR)
         .unwrap()
         .with_mode(JobMode::Agent);
     job.id = Uuid::parse_str("3fa85f64-5717-4562-b3fc-2c963f66afa6").unwrap();
@@ -295,7 +300,7 @@ async fn backend_produces_the_task_request_with_a_null_clarification() {
 async fn task_request_fixture_carries_the_recurring_memory_field() {
     // First dispatch of a one-shot search: no memory (ADR-033).
     let fixture: Value = serde_json::from_str(&fixture("task-request.json")).unwrap();
-    assert_eq!(fixture["seen_urls"], serde_json::json!([]));
+    assert_eq!(fixture["seen_approval_keys"], serde_json::json!([]));
 }
 
 #[tokio::test]
@@ -303,23 +308,25 @@ async fn backend_produces_the_digest_webhook_fixture() {
     // The digest (ADR-036) is consumed by the USER's systems (Slack, n8n,
     // a fork's endpoint…): the fixture pins the outbound shape.
     use backend::domain::ports::{Digest, DigestEntry};
-    use chrono::TimeZone;
+    use backend::domain::{RevocationStatus, RiskTier};
 
     let digest = Digest {
         recurring_search_id: Uuid::parse_str("9a1f0c5e-2b7d-4c3a-8e6f-1d2a3b4c5d6e").unwrap(),
         job_id: Uuid::parse_str("3fa85f64-5717-4562-b3fc-2c963f66afa6").unwrap(),
-        keyword: "rust releases".into(),
+        wallet_address: ADDR.into(),
         new_count: 2,
         new_results: vec![
             DigestEntry {
-                title: "Rust 1.99 released".into(),
-                url: "https://example.com/rust-1-99".into(),
-                published_at: Some(chrono::Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap()),
+                token_symbol: "USDC".into(),
+                spender_address: "0xbad000000000000000000000000000000bad00".into(),
+                tier: RiskTier::Dangerous,
+                revocation_status: RevocationStatus::Revoked,
             },
             DigestEntry {
-                title: "Undated announcement".into(),
-                url: "https://example.com/undated".into(),
-                published_at: None,
+                token_symbol: "WETH".into(),
+                spender_address: "0xca1100000000000000000000000000000ca110".into(),
+                tier: RiskTier::Watch,
+                revocation_status: RevocationStatus::NotAttempted,
             },
         ],
     };
@@ -371,11 +378,12 @@ async fn backend_consumes_the_usage_callback_fixture() {
 async fn backend_produces_the_public_contract_fixtures() {
     use backend::adapters::http::{job_detail_json, recurring_search_json};
     use backend::domain::{
-        AgentStep, DateConfidence, EventType, JobStatus, JobUsage, RecurringSearch, SearchResult,
+        AgentStep, ApprovalFinding, JobStatus, JobUsage, RecurringSearch, RevocationStatus,
+        RiskTier,
     };
     use chrono::TimeZone;
 
-    let mut job = ResearchJob::new(Uuid::new_v4(), "rust releases")
+    let mut job = ScanJob::new(Uuid::new_v4(), ADDR)
         .unwrap()
         .with_mode(JobMode::Agent);
     job.id = Uuid::parse_str("3fa85f64-5717-4562-b3fc-2c963f66afa6").unwrap();
@@ -391,35 +399,45 @@ async fn backend_produces_the_public_contract_fixtures() {
     job.completed_at = Some(chrono::Utc.with_ymd_and_hms(2026, 5, 1, 9, 0, 12).unwrap());
 
     let results = vec![
-        SearchResult {
-            title: "Rust 1.99 released".into(),
-            url: "https://blog.rust-lang.org/rust-1-99".into(),
-            snippet: "The Rust team announced 1.99.".into(),
-            published_at: Some(chrono::Utc.with_ymd_and_hms(2026, 5, 1, 0, 0, 0).unwrap()),
-            date_confidence: DateConfidence::High,
-            event_type: EventType::Release,
-            summary: Some("Rust 1.99 ships faster incremental builds.".into()),
+        ApprovalFinding {
+            chain_id: "1".into(),
+            token_address: "0x1111111111111111111111111111111111111a".into(),
+            token_symbol: "USDC".into(),
+            spender_address: "0xbad000000000000000000000000000000bad00".into(),
+            spender_name: Some("Suspicious Proxy".into()),
+            approved_amount: "Unlimited".into(),
+            tier: RiskTier::Dangerous,
+            malicious_behavior: vec!["phishing_activities".into()],
+            explanation: Some(
+                "This spender is a known malicious contract with an unlimited approval.".into(),
+            ),
             is_new: true,
+            revocation_status: RevocationStatus::Revoked,
+            revocation_tx_hash: Some("0xabc123".into()),
             raw: serde_json::json!({"provider": "fixture"}),
         },
-        SearchResult {
-            title: "An opinion on boring tech".into(),
-            url: "https://example.com/boring".into(),
-            snippet: "No date stated.".into(),
-            published_at: None,
-            date_confidence: DateConfidence::Unknown,
-            event_type: EventType::Other,
-            summary: None,
+        ApprovalFinding {
+            chain_id: "1".into(),
+            token_address: "0x3333333333333333333333333333333333333c".into(),
+            token_symbol: "DAI".into(),
+            spender_address: "0x5afe000000000000000000000000000005afe0".into(),
+            spender_name: Some("Well-Known Router".into()),
+            approved_amount: "50".into(),
+            tier: RiskTier::Safe,
+            malicious_behavior: vec![],
+            explanation: Some("This spender is a verified, low-risk contract.".into()),
             is_new: false,
+            revocation_status: RevocationStatus::NotAttempted,
+            revocation_tx_hash: None,
             raw: serde_json::json!({}),
         },
     ];
     let steps = vec![
         AgentStep {
             seq: 1,
-            kind: "search".into(),
-            detail: "rust 1.99 release".into(),
-            reason: "start with the goal".into(),
+            kind: "scan".into(),
+            detail: "1".into(),
+            reason: "start with Ethereum mainnet".into(),
             new_hits: 2,
         },
         AgentStep {
@@ -427,6 +445,13 @@ async fn backend_produces_the_public_contract_fixtures() {
             kind: "finish".into(),
             detail: String::new(),
             reason: "coverage sufficient".into(),
+            new_hits: 0,
+        },
+        AgentStep {
+            seq: 3,
+            kind: "revoke".into(),
+            detail: "0xbad000000000000000000000000000000bad00".into(),
+            reason: "auto-revoked: tx 0xabc123".into(),
             new_hits: 0,
         },
     ];
@@ -441,7 +466,7 @@ async fn backend_produces_the_public_contract_fixtures() {
     let recurring = RecurringSearch {
         id: Uuid::parse_str("9a1f0c5e-2b7d-4c3a-8e6f-1d2a3b4c5d6e").unwrap(),
         user_id: Uuid::new_v4(),
-        keyword: "rust releases".into(),
+        wallet_address: ADDR.into(),
         mode: JobMode::Agent,
         interval_minutes: 1440,
         webhook_url: Some("https://example.com/webhook".into()),

@@ -33,6 +33,16 @@ _jobs = _meter.create_counter(
     unit="{job}",
     description="Finished jobs by outcome (completed|failed|paused)",
 )
+_revocations = _meter.create_counter(
+    "aiagent.revocations",
+    unit="{revocation}",
+    description="KeeperHub revocation attempts, by risk tier and outcome (revoked|failed)",
+)
+_revocation_duration = _meter.create_histogram(
+    "aiagent.revocation.call.duration",
+    unit="s",
+    description="KeeperHub execute-contract-call + status-poll latency, by outcome",
+)
 
 
 def record_llm_call(
@@ -54,3 +64,12 @@ def record_job(outcome: str, cost_usd: float) -> None:
     _jobs.add(1, {"outcome": outcome})
     if cost_usd:
         _job_cost_usd.add(cost_usd, {"outcome": outcome})
+
+
+def record_revocation(tier: str, outcome: str, duration_s: float) -> None:
+    """One KeeperHub revocation attempt (ADR-058): its outcome (counter) and
+    call latency (histogram), so a spike in failed revocations or a slow
+    KeeperHub response shows up on a dashboard without a DB query."""
+    attrs = {"tier": tier, "outcome": outcome}
+    _revocations.add(1, attrs)
+    _revocation_duration.record(duration_s, attrs)

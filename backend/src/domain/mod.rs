@@ -1,15 +1,15 @@
+pub mod approval_finding;
 pub mod job;
 pub mod ports;
 pub mod recurring;
 pub mod refresh_token;
-pub mod search_result;
 pub mod security_event;
 pub mod user;
 
-pub use job::{AgentStep, JobMode, JobStatus, JobUsage, ResearchJob};
+pub use approval_finding::{sort_by_risk, ApprovalFinding, RevocationStatus, RiskTier};
+pub use job::{AgentStep, JobMode, JobStatus, JobUsage, ScanJob};
 pub use recurring::RecurringSearch;
 pub use refresh_token::RefreshToken;
-pub use search_result::{sort_by_publication_date, DateConfidence, EventType, SearchResult};
 pub use security_event::{SecurityEvent, SecurityEventKind};
 pub use user::User;
 

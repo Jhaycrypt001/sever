@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::domain::ports::{JobDispatcher, PortError};
-use crate::domain::ResearchJob;
+use crate::domain::ScanJob;
 
 /// Dispatches jobs to the FastAPI micro-API, which enqueues them via Celery.
 pub struct HttpJobDispatcher {
@@ -16,16 +16,18 @@ pub struct HttpJobDispatcher {
 #[derive(Serialize)]
 struct TaskRequest<'a> {
     job_id: uuid::Uuid,
-    keyword: &'a str,
+    wallet_address: &'a str,
     /// The user's answer to the agent's clarification question (ADR-032);
     /// null on the first dispatch.
     clarification: Option<&'a str>,
     mode: crate::domain::JobMode,
-    /// Recurring-search run (ADR-033): when true the agent flags the delta
-    /// against `seen_urls` (empty on the first run) and journals a report.
+    /// Recurring-scan run (ADR-033): when true the agent flags the delta
+    /// against `seen_approval_keys` (empty on the first run) and journals a
+    /// report.
     recurring: bool,
-    /// URLs delivered by previous runs of the recurring search.
-    seen_urls: &'a [String],
+    /// Approval keys (chain:token:spender) delivered by previous runs of the
+    /// recurring scan.
+    seen_approval_keys: &'a [String],
 }
 
 impl HttpJobDispatcher {
@@ -40,7 +42,11 @@ impl HttpJobDispatcher {
 
 #[async_trait]
 impl JobDispatcher for HttpJobDispatcher {
-    async fn dispatch(&self, job: &ResearchJob, seen_urls: &[String]) -> Result<(), PortError> {
+    async fn dispatch(
+        &self,
+        job: &ScanJob,
+        seen_approval_keys: &[String],
+    ) -> Result<(), PortError> {
         // Distributed tracing (ADR-029): carry the W3C trace context so the
         // agent joins the same trace. Empty when telemetry is disabled.
         let mut trace_headers = reqwest::header::HeaderMap::new();
@@ -55,11 +61,11 @@ impl JobDispatcher for HttpJobDispatcher {
             .header("X-Request-Id", job.id.to_string())
             .json(&TaskRequest {
                 job_id: job.id,
-                keyword: &job.keyword,
+                wallet_address: &job.wallet_address,
                 clarification: job.answer.as_deref(),
                 mode: job.mode,
                 recurring: job.recurring_search_id.is_some(),
-                seen_urls,
+                seen_approval_keys,
             })
             .send()
             .await
@@ -82,7 +88,11 @@ pub struct NoopJobDispatcher;
 
 #[async_trait]
 impl JobDispatcher for NoopJobDispatcher {
-    async fn dispatch(&self, job: &ResearchJob, _seen_urls: &[String]) -> Result<(), PortError> {
+    async fn dispatch(
+        &self,
+        job: &ScanJob,
+        _seen_approval_keys: &[String],
+    ) -> Result<(), PortError> {
         tracing::warn!(job_id = %job.id, "NoopJobDispatcher: job not sent to any agent");
         Ok(())
     }
@@ -97,6 +107,8 @@ mod tests {
     use axum::Router;
     use std::sync::{Arc, Mutex};
     use uuid::Uuid;
+
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
 
     type SeenHeaders = Arc<Mutex<Vec<(Option<String>, Option<String>, Option<String>)>>>;
 
@@ -134,7 +146,7 @@ mod tests {
     async fn dispatch_sends_internal_token_and_correlation_id() {
         let (base_url, seen) = spawn_stub().await;
         let dispatcher = HttpJobDispatcher::new(base_url, "secret".into());
-        let job = ResearchJob::new(Uuid::new_v4(), "keyword").unwrap();
+        let job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
 
         dispatcher.dispatch(&job, &[]).await.unwrap();
 
@@ -164,7 +176,7 @@ mod tests {
 
         async {
             let dispatcher = HttpJobDispatcher::new(base_url, "secret".into());
-            let job = ResearchJob::new(Uuid::new_v4(), "keyword").unwrap();
+            let job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
             let span = tracing::info_span!("http_request");
             dispatcher
                 .dispatch(&job, &[])

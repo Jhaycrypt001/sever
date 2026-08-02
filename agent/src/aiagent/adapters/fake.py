@@ -2,71 +2,68 @@
 
 No network, no API key. Used by the e2e smoke test in CI (the paid-service ban
 of ADR-012 applies to CI end to end) and for keyless local development. The
-hits exercise the whole date cascade (ADR-011/035): provider date (high),
-page-declared date (high, ADR-035), LLM-extracted date (medium), unknown.
+three fixed approvals exercise the whole risk cascade (ADR-058): a malicious
+spender (dangerous, auto-revoked), an unverified spender (watch, asked
+about), and a verified low-risk spender (safe, left alone).
 """
-
-from datetime import UTC, datetime
 
 from aiagent.domain.models import (
     AgentAction,
     AgentStep,
+    ApprovalFinding,
     AskAction,
-    Critique,
-    EventType,
     FinishAction,
-    HitEnrichment,
-    RawSearchHit,
-    SearchAction,
+    RawApproval,
+    RiskAssessment,
+    RiskTier,
+    ScanAction,
+    classify_risk,
 )
 from aiagent.domain.usage import UsageMeter
 
 
-class FakeSearchProvider:
+class FakeApprovalSource:
     def __init__(self, meter: UsageMeter | None = None) -> None:
         self._meter = meter
 
-    def search(self, keyword: str) -> list[RawSearchHit]:
+    def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
         # ADR-038: fakes count their calls with zero cost — the keyless demo
         # shows honest call counts and a $0 total.
         if self._meter is not None:
             self._meter.record_search()
-        raw = {"provider": "fake", "keyword": keyword}
+        raw = {"provider": "fake", "chain_id": chain_id, "wallet": wallet_address}
         return [
-            RawSearchHit(
-                title="fake-dated-old",
-                url="https://example.com/old",
-                snippet=f"Old article about {keyword}",
-                published_at=datetime(2023, 1, 15, tzinfo=UTC),
-                raw=raw,
+            RawApproval(
+                chain_id=chain_id,
+                token_address="0xdead00000000000000000000000000000dead0",
+                token_symbol="fake-dangerous",
+                spender_address="0xbad000000000000000000000000000000bad00",
+                approved_amount="Unlimited",
+                spender_name="Suspicious Proxy",
+                raw={
+                    **raw,
+                    "malicious_address": 1,
+                    "malicious_behavior": ["phishing_activities"],
+                    "is_open_source": 1,
+                },
             ),
-            RawSearchHit(
-                title="fake-dated-recent",
-                url="https://example.com/recent",
-                snippet=f"Recent article about {keyword}",
-                published_at=datetime(2026, 5, 1, tzinfo=UTC),
-                raw=raw,
+            RawApproval(
+                chain_id=chain_id,
+                token_address="0xf00d00000000000000000000000000000f00d0",
+                token_symbol="fake-watch",
+                spender_address="0xca1100000000000000000000000000000ca110",
+                approved_amount="1000",
+                spender_name="Unverified Contract",
+                raw={**raw, "malicious_address": 0, "is_open_source": 0},
             ),
-            RawSearchHit(
-                title="fake-page-datable",
-                url="https://example.com/page",
-                snippet=f"Article about {keyword} whose page declares its date (ADR-035)",
-                published_at=None,
-                raw=raw,
-            ),
-            RawSearchHit(
-                title="fake-llm-datable",
-                url="https://example.com/llm",
-                snippet=f"Article about {keyword} whose date only the LLM can find",
-                published_at=None,
-                raw=raw,
-            ),
-            RawSearchHit(
-                title="fake-undatable",
-                url="https://example.com/undatable",
-                snippet=f"Undatable page about {keyword}",
-                published_at=None,
-                raw=raw,
+            RawApproval(
+                chain_id=chain_id,
+                token_address="0xc0de00000000000000000000000000000c0de0",
+                token_symbol="fake-safe",
+                spender_address="0x5afe00000000000000000000000000000 5afe".replace(" ", ""),
+                approved_amount="50",
+                spender_name="Well-Known Router",
+                raw={**raw, "malicious_address": 0, "is_open_source": 1},
             ),
         ]
 
@@ -82,70 +79,79 @@ class _FakeLlm:
             self._meter.record_llm(0, 0)
 
 
-class FakePageDateFetcher:
-    """Deterministic stage 2 (ADR-035): only the hit designed for it has a
-    page-declared date — ranked high, above the LLM's medium."""
+class FakeThreatIntel(_FakeLlm):
+    """Deterministic enrichment: tiers each fake approval from the same raw
+    signals a live GoPlus-backed adapter would read, so the fake exercises
+    the identical decision path as production (ADR-058)."""
 
-    def fetch_published_date(self, url: str) -> datetime | None:
-        if url == "https://example.com/page":
-            return datetime(2025, 12, 1, tzinfo=UTC)
-        return None
+    def assess_many(self, approvals: list[RawApproval]) -> list[RiskAssessment]:
+        return [self._assess(a) for a in approvals]
 
-
-class FakeHitEnricher(_FakeLlm):
-    """Deterministic enrichment: a date only for the hit designed to exercise
-    the LLM stage of the cascade, a stable event type and summary for all."""
-
-    def enrich_many(self, hits: list[RawSearchHit]) -> list[HitEnrichment]:
-        return [self.enrich(hit) for hit in hits]
-
-    def enrich(self, hit: RawSearchHit) -> HitEnrichment:
+    def _assess(self, approval: RawApproval) -> RiskAssessment:
         self._count()
-        published_at = None
-        if hit.title == "fake-llm-datable":
-            published_at = datetime(2025, 8, 20, tzinfo=UTC)
-        return HitEnrichment(
-            published_at=published_at,
-            event_type=EventType.ANNOUNCEMENT,
-            summary=f"Fake summary for {hit.title}",
+        tier = classify_risk(approval)  # ADR-058: the tier is never the LLM's call
+        if tier is RiskTier.DANGEROUS:
+            explanation = (
+                f"{approval.spender_address} is a known malicious contract "
+                f"with an unlimited approval — high-confidence drain risk."
+            )
+        elif tier is RiskTier.WATCH:
+            explanation = (
+                f"{approval.spender_address} is unverified (no published "
+                f"source) — not confirmed malicious, but unable to audit."
+            )
+        else:
+            explanation = f"{approval.spender_address} is a verified, low-risk contract."
+        return RiskAssessment(
+            tier=tier,
+            malicious_behavior=tuple(approval.raw.get("malicious_behavior", [])),
+            explanation=explanation,
         )
 
 
 class FakeAgentPolicy(_FakeLlm):
-    """Deterministic policy (ADR-030) for keyless demos and e2e: search the
-    goal, refine once (the fake provider returns the same hits, so the journal
-    shows the deduplication at work), then stop with an explicit reason."""
+    """Deterministic policy (ADR-030/058) for keyless demos and e2e: scan the
+    goal's chain, then a second chain (the fake source returns the same
+    findings, so the journal shows the dedup at work), then stop."""
 
-    def decide(self, goal: str, steps: list[AgentStep], hits: list[RawSearchHit]) -> AgentAction:
+    def decide(
+        self, goal: str, steps: list[AgentStep], approvals: list[RawApproval]
+    ) -> AgentAction:
         self._count()
         # Deterministic HITL trigger (ADR-032): a goal containing "ambiguous"
         # asks for clarification once; the task appends the user's answer to
         # the goal on resume, which disarms the trigger.
         if len(steps) == 0 and "ambiguous" in goal and "(user clarification:" not in goal:
             return AskAction(
-                question="Your goal looks ambiguous — which meaning do you want?",
-                reason="The goal can be read several ways; asking before spending searches",
+                question="Which chains should I scan — just Ethereum, or every supported chain?",
+                reason="The scan scope looks ambiguous; asking before spending calls",
             )
         if len(steps) == 0:
-            return SearchAction(query=goal, reason="Start with the user's goal as the query")
+            return ScanAction(chain_id="1", reason="Start with Ethereum mainnet")
         if len(steps) == 1:
-            return SearchAction(
-                query=f"{goal} latest",
-                reason="Refine for recency to check whether anything newer exists",
-            )
-        return FinishAction(reason="The refined query added nothing new; coverage looks sufficient")
+            return ScanAction(chain_id="8453", reason="Also check Base for outstanding approvals")
+        return FinishAction(reason="All configured chains scanned")
 
 
-class FakeResultCritic(_FakeLlm):
-    """Deterministic self-critique (ADR-031): a stable verdict, nothing
-    dropped, no gap — the e2e journal shows the review step without changing
-    the delivered fake results."""
+class FakeApprovalRevoker:
+    """Deterministic revocation (ADR-058): always succeeds with a fake tx
+    hash, so the keyless demo/e2e can show the full auto-revoke path without
+    KeeperHub or a real chain."""
 
-    def critique(self, goal: str, hits: list[RawSearchHit]) -> Critique:
-        self._count()
-        return Critique(
-            assessment=(
-                f"All {len(hits)} results relate to the goal; "
-                "one could not be dated and is listed separately."
-            )
+    def __init__(self, meter: UsageMeter | None = None) -> None:
+        self._meter = meter
+
+    def revoke(self, finding: ApprovalFinding) -> ApprovalFinding:
+        from dataclasses import replace
+
+        from aiagent.domain.models import RevocationStatus
+
+        # Counted as a generic external call for the spend-cap accounting
+        # (ADR-048); real gas cost is not an LLM/API spend and is tracked
+        # separately by the audit trail (tx hash, gas used), not this meter.
+        if self._meter is not None:
+            self._meter.record_search()
+        fake_hash = f"0xfake{abs(hash(finding.approval_key)) % 10**12:012x}"
+        return replace(
+            finding, revocation_status=RevocationStatus.REVOKED, revocation_tx_hash=fake_hash
         )

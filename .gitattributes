@@ -1,0 +1,4 @@
+# Normalize line endings to LF regardless of the checkout OS (ADR references
+# byte-exact comparisons — e.g. backend/tests/openapi.rs — that a CRLF
+# checkout on Windows would otherwise break).
+* text=auto eol=lf

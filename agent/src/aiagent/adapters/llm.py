@@ -1,8 +1,7 @@
-"""LLM adapters: the HitEnricher (ADR-010/011/027), the AgentPolicy driving
-the agentic loop (ADR-030) and the ResultCritic (ADR-031). Prompts, reply
-handling and usage metering are provider-agnostic: the chat model itself
-(Anthropic API or a local Ollama — ADR-041) is injected, built by
-`chat_model.make_chat_model`.
+"""LLM adapters: the ThreatIntel explainer (ADR-058) and the AgentPolicy
+driving the agentic loop (ADR-030/058). Prompts, reply handling and usage
+metering are provider-agnostic: the chat model itself (Anthropic API or a
+local Ollama — ADR-041) is injected, built by `chat_model.make_chat_model`.
 
 Replies use **native structured output** (ADR-043): each adapter binds a
 pydantic reply schema via `with_structured_output` — tool calling on
@@ -17,7 +16,6 @@ import json
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from opentelemetry import trace
@@ -29,13 +27,11 @@ from aiagent.domain.models import (
     AgentAction,
     AgentStep,
     AskAction,
-    Critique,
-    EventType,
     FinishAction,
-    HitEnrichment,
-    RawSearchHit,
-    SearchAction,
-    as_utc,
+    RawApproval,
+    RiskAssessment,
+    ScanAction,
+    classify_risk,
 )
 from aiagent.domain.usage import UsageMeter
 
@@ -111,77 +107,40 @@ def raw_text(raw: object) -> str:
     return content if isinstance(content, str) else str(content)
 
 
-# ---------------------------------------------------------------- enrichment
+# ---------------------------------------------------------------- threat-intel explanation
 
-ENRICHMENT_PROMPT = """\
-You analyze a web search result about a topic and report, through the reply
-schema:
 
-- published_date: in ISO 8601 (YYYY-MM-DD or full timestamp), or null if it
-  cannot be determined with reasonable confidence — never prose.
-- event_type: exactly one of "announcement", "release", "funding", "legal",
-  "incident", "research", "opinion", "other" (lowercase).
-- summary: one factual sentence (max 25 words) describing the event this
-  page reports.
+EXPLANATION_PROMPT = """\
+You explain, in one plain-English sentence, why an outstanding token approval
+was classified as {tier} risk. You do NOT decide the risk tier — it is given,
+already determined by verified threat-intel signals. Through the reply
+schema, report:
 
-Title: {title}
-URL: {url}
-Excerpt: {snippet}
+- explanation: one factual sentence (max 30 words) a non-technical wallet
+  owner would understand, grounded only in the facts given below — never
+  invent details.
+
+Token: {token_symbol} ({token_address})
+Spender: {spender_address} ({spender_name})
+Approved amount: {approved_amount}
+Risk tier (already decided, do not second-guess it): {tier}
+Known malicious behavior tags: {malicious_behavior}
+Spender contract verified/open-source: {is_open_source}
 """
 
 
-class EnrichmentReply(BaseModel):
-    """Structured analysis of one web search result (ADR-043). Fields stay
-    loosely typed on purpose: an invented event type or a prose date must
-    degrade field by field during conversion, never void the whole reply."""
+class ExplanationReply(BaseModel):
+    """Structured explanation of one classified approval (ADR-043/058)."""
 
-    published_date: str | None = Field(
+    explanation: str | None = Field(
         default=None,
-        description=(
-            "The publication date in ISO 8601 (YYYY-MM-DD or full timestamp), "
-            "or null if it cannot be determined with reasonable confidence"
-        ),
-    )
-    event_type: str | None = Field(
-        default=None,
-        description=(
-            'One of "announcement", "release", "funding", "legal", "incident", '
-            '"research", "opinion", "other"'
-        ),
-    )
-    summary: str | None = Field(
-        default=None,
-        description="One factual sentence (max 25 words) describing the event this page reports",
+        description="One factual sentence (max 30 words) explaining the risk tier",
     )
 
 
-def parse_extracted_date(text: str) -> datetime | None:
-    """Parses an ISO date; anything that is not a clean ISO date means unknown."""
-    cleaned = text.strip().strip("`\"' ")
-    if not cleaned or cleaned.lower() in ("unknown", "null", "none"):
-        return None
-    try:
-        return as_utc(datetime.fromisoformat(cleaned.replace("Z", "+00:00")))
-    except ValueError:
-        return None
-
-
-def enrichment_from_reply(reply: EnrichmentReply) -> HitEnrichment:
-    """Converts the validated reply, degrading field by field (ADR-027).
-    Case-tolerant on the event type: schema-mode models capitalize more
-    freely than prompt-following ones."""
-    published_at = parse_extracted_date(reply.published_date) if reply.published_date else None
-    try:
-        event_type = EventType(str(reply.event_type).strip().lower())
-    except ValueError:
-        event_type = EventType.OTHER
-    summary = reply.summary.strip() if reply.summary and reply.summary.strip() else None
-    return HitEnrichment(published_at=published_at, event_type=event_type, summary=summary)
-
-
-def parse_enrichment(text: str) -> HitEnrichment:
-    """Fallback parser (ADR-043) for models that answered in text: any
-    malformed piece degrades to its neutral value instead of failing the job."""
+def parse_explanation(text: str) -> str | None:
+    """Fallback parser (ADR-043): a malformed reply degrades to no
+    explanation — the tier (already decided) is unaffected either way."""
     cleaned = text.strip()
     if cleaned.startswith("```"):
         cleaned = cleaned.strip("`")
@@ -189,28 +148,18 @@ def parse_enrichment(text: str) -> HitEnrichment:
     try:
         payload = json.loads(cleaned)
     except ValueError:
-        return HitEnrichment()
+        return None
     if not isinstance(payload, dict):
-        return HitEnrichment()
-
-    published_at = None
-    if isinstance(payload.get("published_date"), str):
-        published_at = parse_extracted_date(payload["published_date"])
-    try:
-        event_type = EventType(str(payload.get("event_type")))
-    except ValueError:
-        event_type = EventType.OTHER
-    summary = payload.get("summary")
-    if not isinstance(summary, str) or not summary.strip():
-        summary = None
-
-    return HitEnrichment(published_at=published_at, event_type=event_type, summary=summary)
+        return None
+    explanation = payload.get("explanation")
+    return explanation.strip() if isinstance(explanation, str) and explanation.strip() else None
 
 
-class LlmHitEnricher:
+class LlmThreatIntel:
     """Live adapter — the model call itself is never exercised in CI
     (ADR-012). `llm` is injectable so the prompt/convert/fallback logic
-    around it stays unit-testable with a fake chat model."""
+    around it stays unit-testable with a fake chat model. The risk tier is
+    always `classify_risk` (ADR-058); the LLM only ever fills `explanation`."""
 
     def __init__(
         self,
@@ -222,88 +171,99 @@ class LlmHitEnricher:
         fallbacks: "list[BaseChatModel] | None" = None,
     ) -> None:
         self._meter = meter
-        self._structured = structured_with_fallbacks([llm, *(fallbacks or [])], EnrichmentReply)
-        # Bounds the parallel per-hit calls (ADR-042): fast, without letting a
-        # burst of hits hammer the provider (or overload a local Ollama).
+        self._structured = structured_with_fallbacks([llm, *(fallbacks or [])], ExplanationReply)
+        # Bounds the parallel per-approval calls (ADR-042): fast, without
+        # letting a burst of findings hammer the provider.
         self._concurrency = concurrency
         self._model = model
         self._system = system
 
-    def enrich_many(self, hits: list[RawSearchHit]) -> list[HitEnrichment]:
-        if not hits:
+    def assess_many(self, approvals: list[RawApproval]) -> list[RiskAssessment]:
+        if not approvals:
             return []
+        tiers = [classify_risk(a) for a in approvals]
         prompts: list[Any] = [
-            ENRICHMENT_PROMPT.format(title=hit.title, url=hit.url, snippet=hit.snippet)
-            for hit in hits
+            EXPLANATION_PROMPT.format(
+                token_symbol=a.token_symbol,
+                token_address=a.token_address,
+                spender_address=a.spender_address,
+                spender_name=a.spender_name or "unnamed",
+                approved_amount=a.approved_amount,
+                tier=tier.value,
+                malicious_behavior=", ".join(a.raw.get("malicious_behavior", [])) or "none",
+                is_open_source=bool(a.raw.get("is_open_source", 1)),
+            )
+            for a, tier in zip(approvals, tiers, strict=True)
         ]
-        # One span for the whole batch (ADR-042 runs the per-hit calls together,
-        # so there is no honest per-hit latency to record).
-        with llm_span("enrich", self._model, self._system) as span:
-            span.set_attribute("aiagent.llm.batch_size", len(hits))
-            # One langchain batch = the per-hit calls run concurrently under the
-            # hood; replies come back in prompt order. Usage is recorded here, on
-            # the caller's thread — the meter needs no thread-safety.
+        with llm_span("assess", self._model, self._system) as span:
+            span.set_attribute("aiagent.llm.batch_size", len(approvals))
             start = time.perf_counter()
             results = self._structured.batch(prompts, config={"max_concurrency": self._concurrency})
             duration = time.perf_counter() - start
-            enrichments = []
+            assessments = []
             input_tokens = output_tokens = 0
-            for result in results:
+            for approval, tier, result in zip(approvals, tiers, results, strict=True):
                 raw, parsed = split_structured(result)
                 record_llm_usage(self._meter, raw)
                 got_in, got_out = usage_tokens(raw)
                 input_tokens += got_in
                 output_tokens += got_out
-                if isinstance(parsed, EnrichmentReply):
-                    enrichments.append(enrichment_from_reply(parsed))
-                else:
-                    enrichments.append(parse_enrichment(raw_text(raw)))
+                explanation = (
+                    parsed.explanation
+                    if isinstance(parsed, ExplanationReply) and parsed.explanation
+                    else parse_explanation(raw_text(raw))
+                )
+                assessments.append(
+                    RiskAssessment(
+                        tier=tier,
+                        malicious_behavior=tuple(approval.raw.get("malicious_behavior", [])),
+                        explanation=explanation,
+                    )
+                )
             record_span_usage(span, input_tokens, output_tokens)
-            metrics.record_llm_call("enrich", self._system, duration, input_tokens, output_tokens)
-            return enrichments
-
-    def enrich(self, hit: RawSearchHit) -> HitEnrichment:
-        """Single-hit convenience (live drift tests, ADR-012)."""
-        return self.enrich_many([hit])[0]
+            metrics.record_llm_call("assess", self._system, duration, input_tokens, output_tokens)
+            return assessments
 
 
 # ---------------------------------------------------------------- policy
 
-POLICY_PROMPT = """\
-You are a research agent gathering fresh, relevant web results about a goal.
-Decide your next action through the reply schema: search (again), finish, or
-— only if the goal is genuinely ambiguous AND no clarification is present
-below — ask the user ONE short question before searching.
 
-Rules: refine or vary the query instead of repeating one that brought nothing
-new; stop as soon as coverage looks sufficient or further searches stop adding
-results. Never ask once a clarification is present. The reason is one short
-sentence, shown to the user as your journal.
+POLICY_PROMPT = """\
+You are a wallet-security agent scanning a wallet's outstanding token
+approvals across chains, one chain at a time. Decide your next action
+through the reply schema: scan (another chain), finish, or — only if the
+scan scope is genuinely ambiguous AND no clarification is present below —
+ask the user ONE short question before scanning.
+
+Rules: scan a chain not already covered; stop once every configured chain
+has been scanned or a scan stops adding new findings. Never ask once a
+clarification is present. The reason is one short sentence, shown to the
+user as your journal.
 
 Goal: {goal}
 
-Searches so far (query -> new results added):
+Chains scanned so far (chain_id -> new findings):
 {transcript}
 
-Results collected so far ({count}):
-{titles}
+Findings collected so far ({count}):
+{summary}
 """
 
 
 class ActionReply(BaseModel):
-    """The policy's next action (ADR-030/043)."""
+    """The policy's next action (ADR-030/043/058)."""
 
     action: str = Field(
-        description='"search" to search again, "finish" to stop, '
+        description='"scan" to scan another chain, "finish" to stop, '
         '"ask" to ask the user one clarifying question'
     )
     reason: str | None = Field(
         default=None,
         description="One short sentence explaining the decision, shown to the user",
     )
-    query: str | None = Field(
+    chain_id: str | None = Field(
         default=None,
-        description='The search query — required when action is "search"',
+        description='The chain id to scan next — required when action is "scan"',
     )
     question: str | None = Field(
         default=None,
@@ -312,21 +272,21 @@ class ActionReply(BaseModel):
 
 
 def action_from_reply(reply: ActionReply) -> AgentAction:
-    """Converts the validated reply; a search without a query (or an ask
+    """Converts the validated reply; a scan without a chain id (or an ask
     without a question) degrades to FINISH — never a crash, never a burned
     budget (ADR-030)."""
     reason = reply.reason.strip() if reply.reason and reply.reason.strip() else "no reason given"
     action = reply.action.strip().lower()
-    if action == "search" and reply.query and reply.query.strip():
-        return SearchAction(query=reply.query.strip(), reason=reason)
+    if action == "scan" and reply.chain_id and reply.chain_id.strip():
+        return ScanAction(chain_id=reply.chain_id.strip(), reason=reason)
     if action == "ask" and reply.question and reply.question.strip():
         return AskAction(question=reply.question.strip(), reason=reason)
     return FinishAction(reason=reason)
 
 
 def _action_label(action: AgentAction) -> str:
-    if isinstance(action, SearchAction):
-        return "search"
+    if isinstance(action, ScanAction):
+        return "scan"
     if isinstance(action, AskAction):
         return "ask"
     return "finish"
@@ -348,9 +308,9 @@ def parse_action(text: str) -> AgentAction:
 
     reason = payload.get("reason")
     reason = reason.strip() if isinstance(reason, str) and reason.strip() else "no reason given"
-    query = payload.get("query")
-    if payload.get("action") == "search" and isinstance(query, str) and query.strip():
-        return SearchAction(query=query.strip(), reason=reason)
+    chain_id = payload.get("chain_id")
+    if payload.get("action") == "scan" and isinstance(chain_id, str) and chain_id.strip():
+        return ScanAction(chain_id=chain_id.strip(), reason=reason)
     question = payload.get("question")
     if payload.get("action") == "ask" and isinstance(question, str) and question.strip():
         return AskAction(question=question.strip(), reason=reason)
@@ -358,9 +318,11 @@ def parse_action(text: str) -> AgentAction:
 
 
 class LlmAgentPolicy:
-    """Live AgentPolicy (ADR-030) — the LLM sees the goal, the transcript of
-    its own past decisions and the collected titles (token-frugal), and picks
-    the next action. Same injectable-`llm` pattern as LlmHitEnricher."""
+    """Live AgentPolicy (ADR-030/058) — the LLM sees the goal, the transcript
+    of its own past decisions and the findings collected (token-frugal), and
+    picks the next chain to scan. Same injectable-`llm` pattern as
+    LlmThreatIntel. Never decides whether to revoke (ADR-058) — that is
+    `plan_revocations`, downstream of this loop."""
 
     def __init__(
         self,
@@ -375,11 +337,16 @@ class LlmAgentPolicy:
         self._model = model
         self._system = system
 
-    def decide(self, goal: str, steps: list[AgentStep], hits: list[RawSearchHit]) -> AgentAction:
+    def decide(
+        self, goal: str, steps: list[AgentStep], approvals: list[RawApproval]
+    ) -> AgentAction:
         transcript = "\n".join(f'- "{s.detail}" -> {s.new_hits} new' for s in steps) or "- none yet"
-        titles = "\n".join(f"- {h.title}" for h in hits[:30]) or "- none yet"
+        summary = (
+            "\n".join(f"- {a.token_symbol} -> {a.spender_address}" for a in approvals[:30])
+            or "- none yet"
+        )
         prompt: LanguageModelInput = POLICY_PROMPT.format(
-            goal=goal, transcript=transcript, count=len(hits), titles=titles
+            goal=goal, transcript=transcript, count=len(approvals), summary=summary
         )
         with llm_span("decide", self._model, self._system) as span:
             start = time.perf_counter()
@@ -397,124 +364,3 @@ class LlmAgentPolicy:
             # The decision is the single most useful attribute for reading a run.
             span.set_attribute("aiagent.agent.action", _action_label(action))
             return action
-
-
-# ---------------------------------------------------------------- critique
-
-CRITIQUE_PROMPT = """\
-You are reviewing the results a research agent collected for a goal, before
-they are delivered. Through the reply schema: judge how well the results
-cover the goal, flag the results clearly unrelated to it (be conservative —
-only obvious noise), and if one important angle is missing, name the single
-search query that would fill it.
-
-Goal: {goal}
-
-Results ({count}):
-{listing}
-"""
-
-
-class CritiqueReply(BaseModel):
-    """The critic's verdict (ADR-031/043)."""
-
-    assessment: str | None = Field(
-        default=None,
-        description=(
-            "One or two sentences judging how well the results cover the goal "
-            "(shown to the user verbatim)"
-        ),
-    )
-    irrelevant_urls: list[str] = Field(
-        default_factory=list,
-        description=(
-            "The URLs of results clearly unrelated to the goal (empty list if "
-            "none). Be conservative: only drop obvious noise"
-        ),
-    )
-    gap_query: str | None = Field(
-        default=None,
-        description=(
-            "If one important angle is missing, a single search query that "
-            "would fill it; otherwise null"
-        ),
-    )
-
-
-def critique_from_reply(reply: CritiqueReply) -> Critique:
-    """Converts the validated reply, defaulting each missing piece (ADR-031)."""
-    assessment = (
-        reply.assessment.strip()
-        if reply.assessment and reply.assessment.strip()
-        else "no assessment given"
-    )
-    gap = reply.gap_query.strip() if reply.gap_query and reply.gap_query.strip() else None
-    return Critique(
-        assessment=assessment,
-        irrelevant_urls=tuple(u for u in reply.irrelevant_urls if isinstance(u, str)),
-        gap_query=gap,
-    )
-
-
-def parse_critique(text: str) -> Critique:
-    """Fallback parser (ADR-043): anything malformed becomes a neutral
-    critique (no drops, no gap) — the review must never fail a job."""
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.strip("`")
-        cleaned = cleaned.removeprefix("json").strip()
-    try:
-        payload = json.loads(cleaned)
-    except ValueError:
-        return Critique(assessment="self-critique unavailable (reply was not valid JSON)")
-    if not isinstance(payload, dict):
-        return Critique(assessment="self-critique unavailable (reply was not a JSON object)")
-
-    assessment = payload.get("assessment")
-    if not isinstance(assessment, str) or not assessment.strip():
-        assessment = "no assessment given"
-    urls = payload.get("irrelevant_urls")
-    irrelevant = tuple(u for u in urls if isinstance(u, str)) if isinstance(urls, list) else ()
-    gap = payload.get("gap_query")
-    gap_query = gap.strip() if isinstance(gap, str) and gap.strip() else None
-    return Critique(assessment=assessment.strip(), irrelevant_urls=irrelevant, gap_query=gap_query)
-
-
-class LlmResultCritic:
-    """Live ResultCritic (ADR-031) — one call reviewing the whole result set;
-    same injectable-`llm` pattern as the other adapters."""
-
-    def __init__(
-        self,
-        llm: "BaseChatModel",
-        meter: UsageMeter | None = None,
-        model: str = "",
-        system: str = "",
-        fallbacks: "list[BaseChatModel] | None" = None,
-    ) -> None:
-        self._meter = meter
-        self._structured = structured_with_fallbacks([llm, *(fallbacks or [])], CritiqueReply)
-        self._model = model
-        self._system = system
-
-    def critique(self, goal: str, hits: list[RawSearchHit]) -> Critique:
-        listing = "\n".join(f"- {h.title} — {h.url}\n  {h.snippet}" for h in hits[:30]) or "- none"
-        prompt: LanguageModelInput = CRITIQUE_PROMPT.format(
-            goal=goal, count=len(hits), listing=listing
-        )
-        with llm_span("critique", self._model, self._system) as span:
-            start = time.perf_counter()
-            raw, parsed = split_structured(self._structured.invoke(prompt))
-            duration = time.perf_counter() - start
-            record_llm_usage(self._meter, raw)
-            input_tokens, output_tokens = usage_tokens(raw)
-            record_span_usage(span, input_tokens, output_tokens)
-            metrics.record_llm_call("critique", self._system, duration, input_tokens, output_tokens)
-            critique = (
-                critique_from_reply(parsed)
-                if isinstance(parsed, CritiqueReply)
-                else parse_critique(raw_text(raw))
-            )
-            span.set_attribute("aiagent.critic.dropped", len(critique.irrelevant_urls))
-            span.set_attribute("aiagent.critic.has_gap", critique.gap_query is not None)
-            return critique

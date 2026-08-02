@@ -8,6 +8,7 @@ not a new port: adding a backend is one `elif`, never a new adapter class.
 """
 
 import dataclasses
+import os
 from typing import TYPE_CHECKING
 
 from aiagent.config import Settings
@@ -21,6 +22,15 @@ BACKENDS = ("anthropic", "ollama")
 def make_chat_model(settings: Settings, max_tokens: int) -> "BaseChatModel":
     """Builds the chat model the live adapters talk to, from AGENT_LLM_BACKEND."""
     if settings.llm_backend == "anthropic":
+        # Newer langchain-anthropic releases construct `ChatAnthropic` with an
+        # empty key instead of raising, deferring the failure to the first
+        # API call. That breaks the ADR-020 fail-fast contract this factory
+        # is relied on for (`build_providers` surfaces a misconfigured worker
+        # immediately, before a job ever starts) — checked explicitly here so
+        # the guarantee does not depend on a third-party library's incidental
+        # constructor behavior.
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            raise ValueError("ANTHROPIC_API_KEY is required when AGENT_LLM_BACKEND=anthropic")
         from langchain_anthropic import ChatAnthropic
 
         # `model` / `max_tokens` are pydantic aliases mypy cannot see.

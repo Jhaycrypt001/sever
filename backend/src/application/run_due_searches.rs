@@ -1,4 +1,4 @@
-//! The scheduler tick (ADR-033): launches a job for every recurring search
+//! The scheduler tick (ADR-033): launches a job for every recurring scan
 //! that is due. Runs inside the backend's existing background loop (next to
 //! the ADR-016 reaper) — deliberately **not** Celery beat: that would add a
 //! fifth process and hand scheduling state to the brick that must not own
@@ -9,10 +9,10 @@ use std::sync::Arc;
 use chrono::Utc;
 
 use crate::domain::ports::{JobDispatcher, JobRepository, PortError, RecurringSearchRepository};
-use crate::domain::ResearchJob;
+use crate::domain::ScanJob;
 
 /// Bound on the memory sent to the agent (task payload size).
-const SEEN_URLS_LIMIT: u32 = 200;
+const SEEN_APPROVAL_KEYS_LIMIT: u32 = 200;
 
 pub struct RunDueSearches {
     recurring: Arc<dyn RecurringSearchRepository>,
@@ -36,12 +36,12 @@ impl RunDueSearches {
         }
     }
 
-    /// Launches every due recurring search; returns how many jobs started.
+    /// Launches every due recurring scan; returns how many jobs started.
     ///
-    /// Every outcome marks the search as ran — a quota-skipped or failed run
+    /// Every outcome marks the scan as ran — a quota-skipped or failed run
     /// waits for the next interval instead of hammering every tick. Runs
     /// count against the owner's daily quota (ADR-017) exactly like manual
-    /// searches, so a schedule cannot outspend a user.
+    /// scans, so a schedule cannot outspend a user.
     pub async fn execute(&self) -> Result<u32, PortError> {
         let now = Utc::now();
         let mut launched = 0;
@@ -57,16 +57,16 @@ impl RunDueSearches {
                 continue;
             }
 
-            let seen_urls = self
+            let seen_approval_keys = self
                 .jobs
-                .recent_urls_for_recurring(search.id, SEEN_URLS_LIMIT)
+                .recent_approval_keys_for_recurring(search.id, SEEN_APPROVAL_KEYS_LIMIT)
                 .await?;
-            let mut job = ResearchJob::new(search.user_id, &search.keyword)
+            let mut job = ScanJob::new(search.user_id, &search.wallet_address)
                 .map_err(|e| PortError(e.to_string()))?
                 .with_mode(search.mode)
                 .with_recurring(search.id);
             self.jobs.insert(&job).await?;
-            if let Err(err) = self.dispatcher.dispatch(&job, &seen_urls).await {
+            if let Err(err) = self.dispatcher.dispatch(&job, &seen_approval_keys).await {
                 tracing::error!(job_id = %job.id, error = %err, "recurring dispatch failed");
                 job.fail(format!("dispatch failed: {err}"));
                 self.jobs.update(&job).await?;
@@ -87,11 +87,13 @@ mod tests {
     };
     use crate::domain::ports::JobRepository;
     use crate::domain::{
-        DateConfidence, EventType, JobMode, JobStatus, RecurringSearch, SearchResult,
+        ApprovalFinding, JobMode, JobStatus, RecurringSearch, RevocationStatus, RiskTier,
     };
     use async_trait::async_trait;
     use std::sync::Mutex;
     use uuid::Uuid;
+
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
 
     #[derive(Default)]
     struct RecordingDispatcher {
@@ -100,7 +102,7 @@ mod tests {
 
     #[async_trait]
     impl JobDispatcher for RecordingDispatcher {
-        async fn dispatch(&self, job: &ResearchJob, seen: &[String]) -> Result<(), PortError> {
+        async fn dispatch(&self, job: &ScanJob, seen: &[String]) -> Result<(), PortError> {
             self.dispatched
                 .lock()
                 .unwrap()
@@ -109,16 +111,20 @@ mod tests {
         }
     }
 
-    fn a_result(url: &str) -> SearchResult {
-        SearchResult {
-            title: "t".into(),
-            url: url.into(),
-            snippet: "s".into(),
-            published_at: None,
-            date_confidence: DateConfidence::Unknown,
-            event_type: EventType::default(),
-            summary: None,
+    fn a_result(spender: &str) -> ApprovalFinding {
+        ApprovalFinding {
+            chain_id: "1".into(),
+            token_address: "0xtoken".into(),
+            token_symbol: "TKN".into(),
+            spender_address: spender.into(),
+            spender_name: None,
+            approved_amount: "Unlimited".into(),
+            tier: RiskTier::Safe,
+            malicious_behavior: vec![],
+            explanation: None,
             is_new: true,
+            revocation_status: RevocationStatus::NotAttempted,
+            revocation_tx_hash: None,
             raw: serde_json::Value::Null,
         }
     }
@@ -147,7 +153,7 @@ mod tests {
     async fn launches_due_searches_with_the_memory_of_previous_runs() {
         let h = harness(10);
         let user = Uuid::new_v4();
-        let rs = RecurringSearch::new(user, "rust", JobMode::Agent, 60, None).unwrap();
+        let rs = RecurringSearch::new(user, ADDR, JobMode::Agent, 60, None).unwrap();
         h.recurring.insert(&rs).await.unwrap();
 
         // First tick: due immediately, no memory yet.
@@ -158,16 +164,16 @@ mod tests {
         assert_eq!(stored.recurring_search_id, Some(rs.id));
         assert_eq!(stored.mode, JobMode::Agent);
 
-        // The first run delivered two URLs.
+        // The first run delivered two approvals.
         h.jobs
-            .store_results(first_job, &[a_result("https://a"), a_result("https://b")])
+            .store_results(first_job, &[a_result("0xa"), a_result("0xb")])
             .await
             .unwrap();
 
         // Not due again before the interval.
         assert_eq!(h.run.execute().await.unwrap(), 0);
 
-        // Force due again: the dispatch now carries the seen URLs.
+        // Force due again: the dispatch now carries the seen approval keys.
         h.recurring
             .mark_ran(rs.id, Utc::now() - chrono::Duration::minutes(61))
             .await
@@ -176,11 +182,11 @@ mod tests {
         let (_, second_seen) = h.dispatcher.dispatched.lock().unwrap()[1].clone();
         assert_eq!(
             {
-                let mut urls = second_seen;
-                urls.sort();
-                urls
+                let mut keys = second_seen;
+                keys.sort();
+                keys
             },
-            vec!["https://a".to_string(), "https://b".to_string()]
+            vec!["1:0xtoken:0xa".to_string(), "1:0xtoken:0xb".to_string()]
         );
     }
 
@@ -188,12 +194,12 @@ mod tests {
     async fn quota_exhausted_skips_the_run_but_marks_it_ran() {
         let h = harness(1);
         let user = Uuid::new_v4();
-        // The user already spent the quota on a manual search.
+        // The user already spent the quota on a manual scan.
         h.jobs
-            .insert(&ResearchJob::new(user, "manual").unwrap())
+            .insert(&ScanJob::new(user, ADDR).unwrap())
             .await
             .unwrap();
-        let rs = RecurringSearch::new(user, "rust", JobMode::Workflow, 60, None).unwrap();
+        let rs = RecurringSearch::new(user, ADDR, JobMode::Workflow, 60, None).unwrap();
         h.recurring.insert(&rs).await.unwrap();
 
         assert_eq!(h.run.execute().await.unwrap(), 0);
@@ -207,7 +213,7 @@ mod tests {
         struct FailingDispatcher;
         #[async_trait]
         impl JobDispatcher for FailingDispatcher {
-            async fn dispatch(&self, _: &ResearchJob, _: &[String]) -> Result<(), PortError> {
+            async fn dispatch(&self, _: &ScanJob, _: &[String]) -> Result<(), PortError> {
                 Err(PortError("agent unreachable".into()))
             }
         }
@@ -220,7 +226,7 @@ mod tests {
             10,
         );
         let user = Uuid::new_v4();
-        let rs = RecurringSearch::new(user, "rust", JobMode::Workflow, 60, None).unwrap();
+        let rs = RecurringSearch::new(user, ADDR, JobMode::Workflow, 60, None).unwrap();
         recurring.insert(&rs).await.unwrap();
 
         assert_eq!(run.execute().await.unwrap(), 0);

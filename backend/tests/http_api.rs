@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tower::ServiceExt;
 
 const INTERNAL_TOKEN: &str = "test-internal-token";
+const ADDR: &str = "0x1234567890123456789012345678901234567890";
 
 fn app() -> Router {
     app_with(RateLimitConfig::default(), 100)
@@ -141,7 +142,7 @@ async fn full_search_lifecycle() {
         &app,
         post_json(
             "/api/searches",
-            json!({"keyword": "rust hexagonal"}),
+            json!({"wallet_address": ADDR}),
             &[("authorization", auth.as_str())],
         ),
     )
@@ -171,15 +172,15 @@ async fn full_search_lifecycle() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["status"], "running");
 
-    // Agent callback: results arrive out of order, backend must sort them
+    // Agent callback: findings arrive mixed-tier, backend must sort most-dangerous-first
     let (status, _) = send(
         &app,
         post_json(
             &format!("/internal/jobs/{job_id}/results"),
             json!({"results": [
-                {"title": "old", "url": "https://a", "snippet": "", "published_at": "2023-01-01T00:00:00Z", "date_confidence": "high"},
-                {"title": "no-date", "url": "https://b", "snippet": "", "published_at": null, "date_confidence": "unknown"},
-                {"title": "new", "url": "https://c", "snippet": "", "published_at": "2026-06-01T00:00:00Z", "date_confidence": "medium"}
+                {"chain_id": "1", "token_address": "0xa", "token_symbol": "SAFE", "spender_address": "0xsafe", "approved_amount": "10", "tier": "safe"},
+                {"chain_id": "1", "token_address": "0xb", "token_symbol": "WATCH", "spender_address": "0xwatch", "approved_amount": "100", "tier": "watch"},
+                {"chain_id": "1", "token_address": "0xc", "token_symbol": "BAD", "spender_address": "0xbad", "approved_amount": "Unlimited", "tier": "dangerous"}
             ]}),
             &[("x-internal-token", INTERNAL_TOKEN)],
         ),
@@ -187,7 +188,7 @@ async fn full_search_lifecycle() {
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
 
-    // Read back: completed, results newest first, unknown date last
+    // Read back: completed, findings most-dangerous-first
     let (status, body) = send(
         &app,
         get(
@@ -198,13 +199,13 @@ async fn full_search_lifecycle() {
     .await;
     assert_eq!(status, StatusCode::OK, "get search: {body}");
     assert_eq!(body["status"], "completed");
-    let titles: Vec<&str> = body["results"]
+    let symbols: Vec<&str> = body["results"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| r["title"].as_str().unwrap())
+        .map(|r| r["token_symbol"].as_str().unwrap())
         .collect();
-    assert_eq!(titles, vec!["new", "old", "no-date"]);
+    assert_eq!(symbols, vec!["BAD", "WATCH", "SAFE"]);
 }
 
 #[tokio::test]
@@ -212,7 +213,7 @@ async fn searches_require_authentication() {
     let app = app();
     let (status, _) = send(
         &app,
-        post_json("/api/searches", json!({"keyword": "k"}), &[]),
+        post_json("/api/searches", json!({"wallet_address": ADDR}), &[]),
     )
     .await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
@@ -366,7 +367,7 @@ async fn search_creation_is_capped_by_the_daily_quota() {
         &app,
         post_json(
             "/api/searches",
-            json!({"keyword": "first"}),
+            json!({"wallet_address": ADDR}),
             &[("authorization", auth.as_str())],
         ),
     )
@@ -377,7 +378,7 @@ async fn search_creation_is_capped_by_the_daily_quota() {
         &app,
         post_json(
             "/api/searches",
-            json!({"keyword": "second"}),
+            json!({"wallet_address": ADDR}),
             &[("authorization", auth.as_str())],
         ),
     )
@@ -433,7 +434,7 @@ async fn sse_streams_job_updates_until_terminal() {
         &app,
         post_json(
             "/api/searches",
-            json!({"keyword": "sse"}),
+            json!({"wallet_address": ADDR}),
             &[("authorization", auth.as_str())],
         ),
     )
@@ -482,7 +483,7 @@ async fn sse_streams_job_updates_until_terminal() {
         post_json(
             &format!("/internal/jobs/{job_id}/results"),
             json!({"results": [
-                {"title": "r", "url": "https://r", "snippet": "", "published_at": null, "date_confidence": "unknown"}
+                {"chain_id": "1", "token_address": "0xa", "token_symbol": "R", "spender_address": "0xr", "approved_amount": "1", "tier": "safe"}
             ]}),
             &[("x-internal-token", INTERNAL_TOKEN)],
         ),
@@ -535,7 +536,7 @@ async fn agent_mode_lifecycle_with_journal() {
         &app,
         post_json(
             "/api/searches",
-            json!({"keyword": "rust", "mode": "agent"}),
+            json!({"wallet_address": ADDR, "mode": "agent"}),
             &[("authorization", auth.as_str())],
         ),
     )
@@ -543,8 +544,8 @@ async fn agent_mode_lifecycle_with_journal() {
     assert_eq!(status, StatusCode::ACCEPTED, "create agent search: {body}");
     let job_id = body["job_id"].as_str().unwrap().to_string();
 
-    let step = |seq: i32, kind: &str| json!({"seq": seq, "kind": kind, "detail": "rust", "reason": "because", "new_hits": 2});
-    for payload in [step(1, "search"), step(1, "search"), step(2, "finish")] {
+    let step = |seq: i32, kind: &str| json!({"seq": seq, "kind": kind, "detail": "1", "reason": "because", "new_hits": 2});
+    for payload in [step(1, "scan"), step(1, "scan"), step(2, "finish")] {
         let (status, _) = send(
             &app,
             post_json(
@@ -569,7 +570,7 @@ async fn agent_mode_lifecycle_with_journal() {
     let steps = detail["steps"].as_array().unwrap();
     // The duplicated seq 1 (Celery retry) was ignored: idempotence (ADR-016).
     assert_eq!(steps.len(), 2);
-    assert_eq!(steps[0]["kind"], "search");
+    assert_eq!(steps[0]["kind"], "scan");
     assert_eq!(steps[1]["kind"], "finish");
 
     // A workflow search keeps the default mode and an empty journal.
@@ -577,7 +578,7 @@ async fn agent_mode_lifecycle_with_journal() {
         &app,
         post_json(
             "/api/searches",
-            json!({"keyword": "rust"}),
+            json!({"wallet_address": ADDR}),
             &[("authorization", auth.as_str())],
         ),
     )
@@ -609,7 +610,7 @@ async fn clarification_lifecycle() {
         &app,
         post_json(
             "/api/searches",
-            json!({"keyword": "jaguar", "mode": "agent"}),
+            json!({"wallet_address": ADDR, "mode": "agent"}),
             &[("authorization", &bearer)],
         ),
     )
@@ -631,7 +632,7 @@ async fn clarification_lifecycle() {
         &app,
         post_json(
             &format!("/internal/jobs/{job_id}/steps"),
-            json!({"seq": 1, "kind": "search", "detail": "jaguar", "reason": "r", "new_hits": 2}),
+            json!({"seq": 1, "kind": "scan", "detail": "1", "reason": "r", "new_hits": 2}),
             &internal,
         ),
     )
@@ -710,7 +711,7 @@ async fn recurring_search_crud() {
         &app,
         post_json(
             "/api/recurring",
-            json!({"keyword": "rust releases", "mode": "agent", "interval_minutes": 60}),
+            json!({"wallet_address": ADDR, "mode": "agent", "interval_minutes": 60}),
             &auth,
         ),
     )
@@ -728,7 +729,7 @@ async fn recurring_search_crud() {
         &app,
         post_json(
             "/api/recurring",
-            json!({"keyword": "x", "interval_minutes": 0}),
+            json!({"wallet_address": ADDR, "interval_minutes": 0}),
             &auth,
         ),
     )
@@ -828,7 +829,7 @@ async fn exceeding_the_daily_quota_is_audited() {
         &app,
         post_json(
             "/api/searches",
-            json!({"keyword": "rust"}),
+            json!({"wallet_address": ADDR}),
             &[
                 ("authorization", auth.as_str()),
                 ("x-forwarded-for", "7.7.7.7"),

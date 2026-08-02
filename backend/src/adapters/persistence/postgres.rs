@@ -86,8 +86,8 @@ impl LeaderLock for PostgresLeaderLock {
     }
 }
 use crate::domain::{
-    AgentStep, DateConfidence, EventType, JobMode, JobStatus, JobUsage, RecurringSearch,
-    RefreshToken, ResearchJob, SearchResult, User,
+    AgentStep, ApprovalFinding, JobMode, JobStatus, JobUsage, RecurringSearch, RefreshToken,
+    RevocationStatus, RiskTier, ScanJob, User,
 };
 
 /// Runs the SQL migrations in `backend/migrations/` (idempotent).
@@ -140,22 +140,40 @@ fn mode_from_str(value: &str) -> JobMode {
     }
 }
 
-fn confidence_to_str(confidence: DateConfidence) -> &'static str {
-    match confidence {
-        DateConfidence::High => "high",
-        DateConfidence::Medium => "medium",
-        DateConfidence::Unknown => "unknown",
+fn tier_to_str(tier: RiskTier) -> &'static str {
+    match tier {
+        RiskTier::Safe => "safe",
+        RiskTier::Watch => "watch",
+        RiskTier::Dangerous => "dangerous",
     }
 }
 
-fn confidence_from_str(value: &str) -> Result<DateConfidence, PortError> {
+fn tier_from_str(value: &str) -> Result<RiskTier, PortError> {
     match value {
-        "high" => Ok(DateConfidence::High),
-        "medium" => Ok(DateConfidence::Medium),
-        "unknown" => Ok(DateConfidence::Unknown),
-        other => Err(PortError(format!(
-            "unknown date confidence in database: {other}"
-        ))),
+        "safe" => Ok(RiskTier::Safe),
+        "watch" => Ok(RiskTier::Watch),
+        "dangerous" => Ok(RiskTier::Dangerous),
+        other => Err(PortError(format!("unknown risk tier in database: {other}"))),
+    }
+}
+
+fn revocation_status_to_str(status: RevocationStatus) -> &'static str {
+    match status {
+        RevocationStatus::NotAttempted => "not_attempted",
+        RevocationStatus::Pending => "pending",
+        RevocationStatus::Revoked => "revoked",
+        RevocationStatus::Failed => "failed",
+    }
+}
+
+/// Unknown values degrade to `NotAttempted` (forward compatibility: a newer
+/// agent may write a status this backend version does not know yet).
+fn revocation_status_from_str(value: &str) -> RevocationStatus {
+    match value {
+        "pending" => RevocationStatus::Pending,
+        "revoked" => RevocationStatus::Revoked,
+        "failed" => RevocationStatus::Failed,
+        _ => RevocationStatus::NotAttempted,
     }
 }
 
@@ -168,11 +186,11 @@ fn user_from_row(row: &PgRow) -> User {
     }
 }
 
-fn job_from_row(row: &PgRow) -> Result<ResearchJob, PortError> {
-    Ok(ResearchJob {
+fn job_from_row(row: &PgRow) -> Result<ScanJob, PortError> {
+    Ok(ScanJob {
         id: row.get("id"),
         user_id: row.get("user_id"),
-        keyword: row.get("keyword"),
+        wallet_address: row.get("wallet_address"),
         mode: mode_from_str(row.get("mode")),
         status: status_from_str(row.get("status"))?,
         error: row.get("error"),
@@ -191,44 +209,21 @@ fn job_from_row(row: &PgRow) -> Result<ResearchJob, PortError> {
     })
 }
 
-fn event_type_to_str(event_type: EventType) -> &'static str {
-    match event_type {
-        EventType::Announcement => "announcement",
-        EventType::Release => "release",
-        EventType::Funding => "funding",
-        EventType::Legal => "legal",
-        EventType::Incident => "incident",
-        EventType::Research => "research",
-        EventType::Opinion => "opinion",
-        EventType::Other => "other",
-    }
-}
-
-/// Unknown values degrade to `Other` (forward compatibility: a newer agent may
-/// write event types this backend version does not know yet).
-fn event_type_from_str(value: &str) -> EventType {
-    match value {
-        "announcement" => EventType::Announcement,
-        "release" => EventType::Release,
-        "funding" => EventType::Funding,
-        "legal" => EventType::Legal,
-        "incident" => EventType::Incident,
-        "research" => EventType::Research,
-        "opinion" => EventType::Opinion,
-        _ => EventType::Other,
-    }
-}
-
-fn result_from_row(row: &PgRow) -> Result<SearchResult, PortError> {
-    Ok(SearchResult {
-        title: row.get("title"),
-        url: row.get("url"),
-        snippet: row.get("snippet"),
-        published_at: row.get("published_at"),
-        date_confidence: confidence_from_str(row.get("date_confidence"))?,
-        event_type: event_type_from_str(row.get("event_type")),
-        summary: row.get("summary"),
+fn finding_from_row(row: &PgRow) -> Result<ApprovalFinding, PortError> {
+    let malicious_behavior: serde_json::Value = row.get("malicious_behavior");
+    Ok(ApprovalFinding {
+        chain_id: row.get("chain_id"),
+        token_address: row.get("token_address"),
+        token_symbol: row.get("token_symbol"),
+        spender_address: row.get("spender_address"),
+        spender_name: row.get("spender_name"),
+        approved_amount: row.get("approved_amount"),
+        tier: tier_from_str(row.get("tier"))?,
+        malicious_behavior: serde_json::from_value(malicious_behavior).unwrap_or_default(),
+        explanation: row.get("explanation"),
         is_new: row.get("is_new"),
+        revocation_status: revocation_status_from_str(row.get("revocation_status")),
+        revocation_tx_hash: row.get("revocation_tx_hash"),
         raw: row.get("raw"),
     })
 }
@@ -363,7 +358,7 @@ impl RefreshTokenRepository for PostgresRefreshTokenRepository {
     }
 }
 
-// ---------------------------------------------------------------- jobs + results
+// ---------------------------------------------------------------- jobs + findings
 
 pub struct PostgresJobRepository {
     pool: PgPool,
@@ -377,14 +372,14 @@ impl PostgresJobRepository {
 
 #[async_trait]
 impl JobRepository for PostgresJobRepository {
-    async fn insert(&self, job: &ResearchJob) -> Result<(), PortError> {
+    async fn insert(&self, job: &ScanJob) -> Result<(), PortError> {
         sqlx::query(
-            "INSERT INTO research_jobs (id, user_id, keyword, mode, status, error, question, answer, recurring_search_id, created_at, completed_at)
+            "INSERT INTO scan_jobs (id, user_id, wallet_address, mode, status, error, question, answer, recurring_search_id, created_at, completed_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
         )
         .bind(job.id)
         .bind(job.user_id)
-        .bind(&job.keyword)
+        .bind(&job.wallet_address)
         .bind(mode_to_str(job.mode))
         .bind(status_to_str(job.status))
         .bind(&job.error)
@@ -399,9 +394,9 @@ impl JobRepository for PostgresJobRepository {
         Ok(())
     }
 
-    async fn update(&self, job: &ResearchJob) -> Result<(), PortError> {
+    async fn update(&self, job: &ScanJob) -> Result<(), PortError> {
         sqlx::query(
-            "UPDATE research_jobs
+            "UPDATE scan_jobs
              SET status = $2, error = $3, question = $4, answer = $5, completed_at = $6
              WHERE id = $1",
         )
@@ -417,12 +412,12 @@ impl JobRepository for PostgresJobRepository {
         Ok(())
     }
 
-    async fn find(&self, id: Uuid) -> Result<Option<ResearchJob>, PortError> {
+    async fn find(&self, id: Uuid) -> Result<Option<ScanJob>, PortError> {
         let row = sqlx::query(
-            "SELECT id, user_id, keyword, mode, status, error, question, answer, recurring_search_id,
+            "SELECT id, user_id, wallet_address, mode, status, error, question, answer, recurring_search_id,
                     llm_calls, llm_input_tokens, llm_output_tokens, search_calls, cost_usd,
                     created_at, completed_at
-             FROM research_jobs WHERE id = $1",
+             FROM scan_jobs WHERE id = $1",
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -431,12 +426,12 @@ impl JobRepository for PostgresJobRepository {
         row.as_ref().map(job_from_row).transpose()
     }
 
-    async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<ResearchJob>, PortError> {
+    async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<ScanJob>, PortError> {
         let rows = sqlx::query(
-            "SELECT id, user_id, keyword, mode, status, error, question, answer, recurring_search_id,
+            "SELECT id, user_id, wallet_address, mode, status, error, question, answer, recurring_search_id,
                     llm_calls, llm_input_tokens, llm_output_tokens, search_calls, cost_usd,
                     created_at, completed_at
-             FROM research_jobs WHERE user_id = $1 ORDER BY created_at DESC",
+             FROM scan_jobs WHERE user_id = $1 ORDER BY created_at DESC",
         )
         .bind(user_id)
         .fetch_all(&self.pool)
@@ -451,7 +446,7 @@ impl JobRepository for PostgresJobRepository {
         since: DateTime<Utc>,
     ) -> Result<u64, PortError> {
         let row = sqlx::query(
-            "SELECT COUNT(*) AS n FROM research_jobs WHERE user_id = $1 AND created_at >= $2",
+            "SELECT COUNT(*) AS n FROM scan_jobs WHERE user_id = $1 AND created_at >= $2",
         )
         .bind(user_id)
         .bind(since)
@@ -465,12 +460,12 @@ impl JobRepository for PostgresJobRepository {
     async fn list_unfinished_older_than(
         &self,
         cutoff: DateTime<Utc>,
-    ) -> Result<Vec<ResearchJob>, PortError> {
+    ) -> Result<Vec<ScanJob>, PortError> {
         let rows = sqlx::query(
-            "SELECT id, user_id, keyword, mode, status, error, question, answer, recurring_search_id,
+            "SELECT id, user_id, wallet_address, mode, status, error, question, answer, recurring_search_id,
                     llm_calls, llm_input_tokens, llm_output_tokens, search_calls, cost_usd,
                     created_at, completed_at
-             FROM research_jobs
+             FROM scan_jobs
              WHERE status IN ('pending', 'running') AND created_at < $1",
         )
         .bind(cutoff)
@@ -480,29 +475,42 @@ impl JobRepository for PostgresJobRepository {
         rows.iter().map(job_from_row).collect()
     }
 
-    async fn store_results(&self, job_id: Uuid, results: &[SearchResult]) -> Result<(), PortError> {
+    async fn store_results(
+        &self,
+        job_id: Uuid,
+        results: &[ApprovalFinding],
+    ) -> Result<(), PortError> {
         // Replace semantics inside one transaction: re-delivery by the worker
-        // (Celery retry) must not duplicate results.
+        // (Celery retry) must not duplicate findings.
         let mut tx = self.pool.begin().await.map_err(db_err)?;
-        sqlx::query("DELETE FROM search_results WHERE job_id = $1")
+        sqlx::query("DELETE FROM approval_findings WHERE job_id = $1")
             .bind(job_id)
             .execute(&mut *tx)
             .await
             .map_err(db_err)?;
         for result in results {
+            let malicious_behavior = serde_json::to_value(&result.malicious_behavior)
+                .map_err(|e| PortError(format!("serialization error: {e}")))?;
             sqlx::query(
-                "INSERT INTO search_results (job_id, title, url, snippet, published_at, date_confidence, event_type, summary, is_new, raw)
-                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                "INSERT INTO approval_findings
+                    (job_id, chain_id, token_address, token_symbol, spender_address, spender_name,
+                     approved_amount, tier, malicious_behavior, explanation, is_new,
+                     revocation_status, revocation_tx_hash, raw)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
             )
             .bind(job_id)
-            .bind(&result.title)
-            .bind(&result.url)
-            .bind(&result.snippet)
-            .bind(result.published_at)
-            .bind(confidence_to_str(result.date_confidence))
-            .bind(event_type_to_str(result.event_type))
-            .bind(&result.summary)
+            .bind(&result.chain_id)
+            .bind(&result.token_address)
+            .bind(&result.token_symbol)
+            .bind(&result.spender_address)
+            .bind(&result.spender_name)
+            .bind(&result.approved_amount)
+            .bind(tier_to_str(result.tier))
+            .bind(malicious_behavior)
+            .bind(&result.explanation)
             .bind(result.is_new)
+            .bind(revocation_status_to_str(result.revocation_status))
+            .bind(&result.revocation_tx_hash)
             .bind(&result.raw)
             .execute(&mut *tx)
             .await
@@ -511,17 +519,18 @@ impl JobRepository for PostgresJobRepository {
         tx.commit().await.map_err(db_err)
     }
 
-    async fn results_for(&self, job_id: Uuid) -> Result<Vec<SearchResult>, PortError> {
+    async fn results_for(&self, job_id: Uuid) -> Result<Vec<ApprovalFinding>, PortError> {
         let rows = sqlx::query(
-            "SELECT title, url, snippet, published_at, date_confidence, event_type, summary, is_new, raw
-             FROM search_results WHERE job_id = $1
-             ORDER BY published_at DESC NULLS LAST",
+            "SELECT chain_id, token_address, token_symbol, spender_address, spender_name,
+                    approved_amount, tier, malicious_behavior, explanation, is_new,
+                    revocation_status, revocation_tx_hash, raw
+             FROM approval_findings WHERE job_id = $1",
         )
         .bind(job_id)
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
-        rows.iter().map(result_from_row).collect()
+        rows.iter().map(finding_from_row).collect()
     }
 
     async fn append_step(&self, job_id: Uuid, step: &AgentStep) -> Result<(), PortError> {
@@ -575,7 +584,7 @@ impl JobRepository for PostgresJobRepository {
 
     async fn add_usage(&self, job_id: Uuid, usage: &JobUsage) -> Result<(), PortError> {
         sqlx::query(
-            "UPDATE research_jobs
+            "UPDATE scan_jobs
              SET llm_calls = llm_calls + $2,
                  llm_input_tokens = llm_input_tokens + $3,
                  llm_output_tokens = llm_output_tokens + $4,
@@ -595,17 +604,18 @@ impl JobRepository for PostgresJobRepository {
         Ok(())
     }
 
-    async fn recent_urls_for_recurring(
+    async fn recent_approval_keys_for_recurring(
         &self,
         recurring_search_id: Uuid,
         limit: u32,
     ) -> Result<Vec<String>, PortError> {
         let rows = sqlx::query(
-            "SELECT DISTINCT ON (r.url) r.url, j.created_at
-             FROM search_results r
-             JOIN research_jobs j ON j.id = r.job_id
+            "SELECT DISTINCT ON (f.chain_id, f.token_address, f.spender_address)
+                    f.chain_id, f.token_address, f.spender_address, j.created_at
+             FROM approval_findings f
+             JOIN scan_jobs j ON j.id = f.job_id
              WHERE j.recurring_search_id = $1
-             ORDER BY r.url, j.created_at DESC
+             ORDER BY f.chain_id, f.token_address, f.spender_address, j.created_at DESC
              LIMIT $2",
         )
         .bind(recurring_search_id)
@@ -613,7 +623,15 @@ impl JobRepository for PostgresJobRepository {
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;
-        Ok(rows.iter().map(|row| row.get("url")).collect())
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let chain_id: String = row.get("chain_id");
+                let token_address: String = row.get("token_address");
+                let spender_address: String = row.get("spender_address");
+                format!("{chain_id}:{token_address}:{spender_address}").to_lowercase()
+            })
+            .collect())
     }
 }
 
@@ -634,7 +652,7 @@ fn recurring_from_row(row: &PgRow) -> RecurringSearch {
     RecurringSearch {
         id: row.get("id"),
         user_id: row.get("user_id"),
-        keyword: row.get("keyword"),
+        wallet_address: row.get("wallet_address"),
         mode: mode_from_str(row.get("mode")),
         interval_minutes: interval as u32,
         webhook_url: row.get("webhook_url"),
@@ -644,7 +662,7 @@ fn recurring_from_row(row: &PgRow) -> RecurringSearch {
 }
 
 const RECURRING_COLS: &str =
-    "SELECT id, user_id, keyword, mode, interval_minutes, webhook_url, created_at, last_run_at
+    "SELECT id, user_id, wallet_address, mode, interval_minutes, webhook_url, created_at, last_run_at
      FROM recurring_searches";
 
 #[async_trait]
@@ -652,12 +670,12 @@ impl RecurringSearchRepository for PostgresRecurringSearchRepository {
     async fn insert(&self, search: &RecurringSearch) -> Result<(), PortError> {
         sqlx::query(
             "INSERT INTO recurring_searches
-             (id, user_id, keyword, mode, interval_minutes, webhook_url, created_at, last_run_at)
+             (id, user_id, wallet_address, mode, interval_minutes, webhook_url, created_at, last_run_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(search.id)
         .bind(search.user_id)
-        .bind(&search.keyword)
+        .bind(&search.wallet_address)
         .bind(mode_to_str(search.mode))
         .bind(search.interval_minutes as i32)
         .bind(&search.webhook_url)

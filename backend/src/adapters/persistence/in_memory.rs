@@ -10,7 +10,7 @@ use crate::domain::ports::{
     UserRepository,
 };
 use crate::domain::{
-    AgentStep, JobStatus, JobUsage, RecurringSearch, RefreshToken, ResearchJob, SearchResult,
+    AgentStep, ApprovalFinding, JobStatus, JobUsage, RecurringSearch, RefreshToken, ScanJob,
     SecurityEvent, User,
 };
 
@@ -89,19 +89,19 @@ impl RefreshTokenRepository for InMemoryRefreshTokenRepository {
 
 #[derive(Default)]
 pub struct InMemoryJobRepository {
-    jobs: Mutex<HashMap<Uuid, ResearchJob>>,
-    results: Mutex<HashMap<Uuid, Vec<SearchResult>>>,
+    jobs: Mutex<HashMap<Uuid, ScanJob>>,
+    results: Mutex<HashMap<Uuid, Vec<ApprovalFinding>>>,
     steps: Mutex<HashMap<Uuid, Vec<AgentStep>>>,
 }
 
 #[async_trait]
 impl JobRepository for InMemoryJobRepository {
-    async fn insert(&self, job: &ResearchJob) -> Result<(), PortError> {
+    async fn insert(&self, job: &ScanJob) -> Result<(), PortError> {
         self.jobs.lock().unwrap().insert(job.id, job.clone());
         Ok(())
     }
 
-    async fn update(&self, job: &ResearchJob) -> Result<(), PortError> {
+    async fn update(&self, job: &ScanJob) -> Result<(), PortError> {
         let mut jobs = self.jobs.lock().unwrap();
         // Usage is only ever written through add_usage (ADR-038): a lifecycle
         // update must not clobber the accumulated spend (mirrors the SQL
@@ -114,12 +114,12 @@ impl JobRepository for InMemoryJobRepository {
         Ok(())
     }
 
-    async fn find(&self, id: Uuid) -> Result<Option<ResearchJob>, PortError> {
+    async fn find(&self, id: Uuid) -> Result<Option<ScanJob>, PortError> {
         Ok(self.jobs.lock().unwrap().get(&id).cloned())
     }
 
-    async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<ResearchJob>, PortError> {
-        let mut jobs: Vec<ResearchJob> = self
+    async fn list_for_user(&self, user_id: Uuid) -> Result<Vec<ScanJob>, PortError> {
+        let mut jobs: Vec<ScanJob> = self
             .jobs
             .lock()
             .unwrap()
@@ -148,7 +148,7 @@ impl JobRepository for InMemoryJobRepository {
     async fn list_unfinished_older_than(
         &self,
         cutoff: DateTime<Utc>,
-    ) -> Result<Vec<ResearchJob>, PortError> {
+    ) -> Result<Vec<ScanJob>, PortError> {
         Ok(self
             .jobs
             .lock()
@@ -163,7 +163,11 @@ impl JobRepository for InMemoryJobRepository {
             .collect())
     }
 
-    async fn store_results(&self, job_id: Uuid, results: &[SearchResult]) -> Result<(), PortError> {
+    async fn store_results(
+        &self,
+        job_id: Uuid,
+        results: &[ApprovalFinding],
+    ) -> Result<(), PortError> {
         self.results
             .lock()
             .unwrap()
@@ -171,7 +175,7 @@ impl JobRepository for InMemoryJobRepository {
         Ok(())
     }
 
-    async fn results_for(&self, job_id: Uuid) -> Result<Vec<SearchResult>, PortError> {
+    async fn results_for(&self, job_id: Uuid) -> Result<Vec<ApprovalFinding>, PortError> {
         Ok(self
             .results
             .lock()
@@ -214,30 +218,31 @@ impl JobRepository for InMemoryJobRepository {
         Ok(())
     }
 
-    async fn recent_urls_for_recurring(
+    async fn recent_approval_keys_for_recurring(
         &self,
         recurring_search_id: Uuid,
         limit: u32,
     ) -> Result<Vec<String>, PortError> {
         let jobs = self.jobs.lock().unwrap();
         let results = self.results.lock().unwrap();
-        let mut runs: Vec<&ResearchJob> = jobs
+        let mut runs: Vec<&ScanJob> = jobs
             .values()
             .filter(|j| j.recurring_search_id == Some(recurring_search_id))
             .collect();
         runs.sort_by_key(|j| std::cmp::Reverse(j.created_at));
-        let mut urls = Vec::new();
+        let mut keys = Vec::new();
         for job in runs {
             for result in results.get(&job.id).map(Vec::as_slice).unwrap_or_default() {
-                if !urls.contains(&result.url) {
-                    urls.push(result.url.clone());
-                    if urls.len() as u32 >= limit {
-                        return Ok(urls);
+                let key = result.approval_key();
+                if !keys.contains(&key) {
+                    keys.push(key);
+                    if keys.len() as u32 >= limit {
+                        return Ok(keys);
                     }
                 }
             }
         }
-        Ok(urls)
+        Ok(keys)
     }
 }
 

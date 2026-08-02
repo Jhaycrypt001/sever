@@ -1,8 +1,6 @@
-"""LangGraph orchestration (ADR-046): parity with the hand-rolled loop, plus
-the checkpointed interrupt/resume HITL. Driven with scripted ports and an
-in-memory checkpointer — deterministic, no I/O, no paid call."""
-
-from datetime import UTC, datetime
+"""LangGraph orchestration (ADR-046/058): parity with the hand-rolled loop,
+plus the checkpointed interrupt/resume HITL. Driven with scripted ports and
+an in-memory checkpointer — deterministic, no I/O, no paid call."""
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
@@ -12,12 +10,14 @@ from aiagent.domain.models import (
     AgentAction,
     AgentStep,
     AgentStepKind,
+    ApprovalFinding,
     AskAction,
-    Critique,
     FinishAction,
-    HitEnrichment,
-    RawSearchHit,
-    SearchAction,
+    RawApproval,
+    RevocationStatus,
+    RiskAssessment,
+    RiskTier,
+    ScanAction,
 )
 from aiagent.domain.usage import Pricing, SpendGuard, UsageMeter
 
@@ -27,25 +27,56 @@ class ScriptedPolicy:
         self._actions = list(actions)
         self.seen: list[tuple[int, int]] = []
 
-    def decide(self, goal: str, steps: list[AgentStep], hits: list[RawSearchHit]) -> AgentAction:
-        self.seen.append((len(steps), len(hits)))
+    def decide(
+        self, goal: str, steps: list[AgentStep], approvals: list[RawApproval]
+    ) -> AgentAction:
+        self.seen.append((len(steps), len(approvals)))
         self.last_goal = goal
         return self._actions.pop(0)
 
 
-class MappedSearch:
-    def __init__(self, by_query: dict[str, list[RawSearchHit]]) -> None:
-        self._by_query = by_query
-        self.queries: list[str] = []
+class MappedSource:
+    def __init__(self, by_chain: dict[str, list[RawApproval]]) -> None:
+        self._by_chain = by_chain
+        self.chain_ids: list[str] = []
 
-    def search(self, keyword: str) -> list[RawSearchHit]:
-        self.queries.append(keyword)
-        return self._by_query.get(keyword, [])
+    def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
+        self.chain_ids.append(chain_id)
+        return self._by_chain.get(chain_id, [])
 
 
-class NeutralEnricher:
-    def enrich_many(self, hits: list[RawSearchHit]) -> list[HitEnrichment]:
-        return [HitEnrichment() for _ in hits]
+class NeutralThreatIntel:
+    def assess_many(self, approvals: list[RawApproval]) -> list[RiskAssessment]:
+        return [RiskAssessment() for _ in approvals]
+
+
+class TieredThreatIntel:
+    def __init__(self, tiers: dict[str, RiskTier] | None = None) -> None:
+        self._tiers = tiers or {}
+
+    def assess_many(self, approvals: list[RawApproval]) -> list[RiskAssessment]:
+        return [
+            RiskAssessment(tier=self._tiers.get(a.spender_address, RiskTier.SAFE))
+            for a in approvals
+        ]
+
+
+class RecordingRevoker:
+    """Always succeeds with a synthetic tx hash unless `fail_for` names the spender."""
+
+    def __init__(self, fail_for: set[str] | None = None) -> None:
+        self._fail_for = fail_for or set()
+        self.revoked: list[str] = []
+
+    def revoke(self, finding: ApprovalFinding) -> ApprovalFinding:
+        from dataclasses import replace
+
+        self.revoked.append(finding.spender_address)
+        if finding.spender_address in self._fail_for:
+            return replace(finding, revocation_status=RevocationStatus.FAILED)
+        return replace(
+            finding, revocation_status=RevocationStatus.REVOKED, revocation_tx_hash="0xtx"
+        )
 
 
 class RecordingSink:
@@ -82,18 +113,24 @@ class RecordingClarifier:
         self.questions.append((job_id, question))
 
 
-def hit(url: str, title: str = "t") -> RawSearchHit:
-    return RawSearchHit(
-        title=title, url=url, snippet="s", published_at=datetime(2026, 1, 1, tzinfo=UTC)
+def approval(spender: str, chain_id: str = "1") -> RawApproval:
+    return RawApproval(
+        chain_id=chain_id,
+        token_address="0xtoken",
+        token_symbol="TKN",
+        spender_address=spender,
+        approved_amount="Unlimited",
     )
 
 
-def run(job_id, goal, search, policy, sink, reporter, checkpointer=None, **kw):  # type: ignore[no-untyped-def]
+def run(job_id, goal, source, policy, sink, reporter, checkpointer=None, **kw):  # type: ignore[no-untyped-def]
+    threat_intel = kw.pop("threat_intel", NeutralThreatIntel())
     return run_agent_graph(
         job_id,
         goal,
-        search,
-        NeutralEnricher(),
+        "0xwallet",
+        source,
+        threat_intel,
         policy,
         sink,
         reporter,
@@ -105,102 +142,162 @@ def run(job_id, goal, search, policy, sink, reporter, checkpointer=None, **kw): 
 # ---------------------------------------------------------------- parity
 
 
-def test_searches_deduplicates_and_finishes() -> None:
-    search = MappedSearch(
+def test_scans_multiple_chains_and_finishes() -> None:
+    source = MappedSource(
         {
-            "rust": [hit("https://a"), hit("https://b")],
-            "rust 2026": [hit("https://b"), hit("https://c")],
+            "1": [approval("a"), approval("b")],
+            "8453": [approval("b", "8453"), approval("c", "8453")],
         }
     )
     policy = ScriptedPolicy(
         [
-            SearchAction(query="rust", reason="start"),
-            SearchAction(query="rust 2026", reason="refine"),
+            ScanAction(chain_id="1", reason="start"),
+            ScanAction(chain_id="8453", reason="refine"),
             FinishAction(reason="coverage sufficient"),
         ]
     )
     sink, reporter = RecordingSink(), RecordingReporter()
 
-    results = run("job-1", "rust", search, policy, sink, reporter, max_steps=5)
+    results = run("job-1", "goal", source, policy, sink, reporter, max_steps=5)
 
-    assert search.queries == ["rust", "rust 2026"]
-    assert [r.url for r in results] == ["https://a", "https://b", "https://c"]
-    assert sink.started == ["job-1"] and sink.delivered == [("job-1", 3)]
+    assert source.chain_ids == ["1", "8453"]
+    # "b" is a distinct approval per chain (dedup keys on chain+token+spender)
+    # — the same spender address on two chains is not a duplicate.
+    assert len(results) == 4
+    assert sink.started == ["job-1"] and sink.delivered == [("job-1", 4)]
     assert [(s.seq, s.kind, s.detail, s.new_hits) for s in reporter.steps] == [
-        (1, AgentStepKind.SEARCH, "rust", 2),
-        (2, AgentStepKind.SEARCH, "rust 2026", 1),
+        (1, AgentStepKind.SCAN, "1", 2),
+        (2, AgentStepKind.SCAN, "8453", 2),
         (3, AgentStepKind.FINISH, "", 0),
     ]
 
 
-def test_budget_exhaustion_forces_a_finish_step() -> None:
-    search = MappedSearch({"q": [hit("https://a")]})
+def test_deduplicates_a_redundant_rescan_of_the_same_chain() -> None:
+    source = MappedSource({"1": [approval("a"), approval("b")]})
     policy = ScriptedPolicy(
-        [SearchAction(query="q", reason="1"), SearchAction(query="q", reason="2")]
+        [
+            ScanAction(chain_id="1", reason="start"),
+            ScanAction(chain_id="1", reason="rescan"),  # redundant
+            FinishAction(reason="coverage sufficient"),
+        ]
     )
     sink, reporter = RecordingSink(), RecordingReporter()
 
-    run("job-2", "goal", search, policy, sink, reporter, max_steps=2)
+    results = run("job-1b", "goal", source, policy, sink, reporter, max_steps=5)
+
+    assert source.chain_ids == ["1", "1"]
+    assert {r.spender_address for r in results} == {"a", "b"}
+    assert sink.delivered == [("job-1b", 2)]
+    assert [(s.kind, s.new_hits) for s in reporter.steps] == [
+        (AgentStepKind.SCAN, 2),
+        (AgentStepKind.SCAN, 0),
+        (AgentStepKind.FINISH, 0),
+    ]
+
+
+def test_budget_exhaustion_forces_a_finish_step() -> None:
+    source = MappedSource({"1": [approval("a")]})
+    policy = ScriptedPolicy(
+        [ScanAction(chain_id="1", reason="1"), ScanAction(chain_id="1", reason="2")]
+    )
+    sink, reporter = RecordingSink(), RecordingReporter()
+
+    run("job-2", "goal", source, policy, sink, reporter, max_steps=2)
 
     assert [s.kind for s in reporter.steps] == [
-        AgentStepKind.SEARCH,
-        AgentStepKind.SEARCH,
+        AgentStepKind.SCAN,
+        AgentStepKind.SCAN,
         AgentStepKind.FINISH,
     ]
     assert "budget" in reporter.steps[-1].reason
     assert sink.delivered == [("job-2", 1)]
 
 
-def test_critique_drops_off_topic_hits() -> None:
-    search = MappedSearch({"q": [hit("https://a"), hit("https://off-topic")]})
-    policy = ScriptedPolicy([SearchAction(query="q", reason="r"), FinishAction(reason="done")])
-    critic = _ScriptedCritic(
-        Critique(assessment="One is unrelated.", irrelevant_urls=("https://off-topic",))
+def test_dangerous_findings_are_auto_revoked_after_the_scan() -> None:
+    source = MappedSource({"1": [approval("safe"), approval("dangerous")]})
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r"), FinishAction(reason="done")])
+    revoker = RecordingRevoker()
+    sink, reporter = RecordingSink(), RecordingReporter()
+
+    results = run(
+        "job-5",
+        "goal",
+        source,
+        policy,
+        sink,
+        reporter,
+        threat_intel=TieredThreatIntel({"dangerous": RiskTier.DANGEROUS}),
+        revoker=revoker,
+        max_steps=5,
     )
+
+    assert revoker.revoked == ["dangerous"]
+    by_spender = {r.spender_address: r for r in results}
+    assert by_spender["dangerous"].revocation_status == RevocationStatus.REVOKED
+    assert by_spender["safe"].revocation_status == RevocationStatus.NOT_ATTEMPTED
+    assert reporter.steps[-1].kind is AgentStepKind.REVOKE
+
+
+def test_revocation_failure_is_recorded_not_raised() -> None:
+    source = MappedSource({"1": [approval("dangerous")]})
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r"), FinishAction(reason="done")])
+    revoker = RecordingRevoker(fail_for={"dangerous"})
     sink, reporter = RecordingSink(), RecordingReporter()
 
-    results = run("job-5", "goal", search, policy, sink, reporter, critic=critic, max_steps=5)
+    results = run(
+        "job-6",
+        "goal",
+        source,
+        policy,
+        sink,
+        reporter,
+        threat_intel=TieredThreatIntel({"dangerous": RiskTier.DANGEROUS}),
+        revoker=revoker,
+        max_steps=5,
+    )
 
-    assert [r.url for r in results] == ["https://a"]
-    last = reporter.steps[-1]
-    assert last.kind is AgentStepKind.CRITIQUE and "dropped 1 off-topic" in last.reason
+    assert results is not None and results[0].revocation_status == RevocationStatus.FAILED
+    assert "failed" in reporter.steps[-1].reason
 
 
-def test_critique_gap_triggers_one_repair_search() -> None:
-    search = MappedSearch({"q": [hit("https://a")], "q recent": [hit("https://fresh")]})
-    policy = ScriptedPolicy([SearchAction(query="q", reason="r"), FinishAction(reason="done")])
-    critic = _ScriptedCritic(Critique(assessment="No recent source.", gap_query="q recent"))
+def test_no_revoker_means_no_execution() -> None:
+    source = MappedSource({"1": [approval("dangerous")]})
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r"), FinishAction(reason="done")])
     sink, reporter = RecordingSink(), RecordingReporter()
 
-    results = run("job-6", "goal", search, policy, sink, reporter, critic=critic, max_steps=5)
+    results = run(
+        "job-7",
+        "goal",
+        source,
+        policy,
+        sink,
+        reporter,
+        threat_intel=TieredThreatIntel({"dangerous": RiskTier.DANGEROUS}),
+        revoker=None,
+        max_steps=5,
+    )
 
-    assert search.queries == ["q", "q recent"]
-    assert {r.url for r in results} == {"https://a", "https://fresh"}
-    assert [s.kind for s in reporter.steps] == [
-        AgentStepKind.SEARCH,
-        AgentStepKind.FINISH,
-        AgentStepKind.CRITIQUE,
-        AgentStepKind.SEARCH,
-    ]
+    assert results is not None and results[0].revocation_status == RevocationStatus.NOT_ATTEMPTED
+    assert all(s.kind is not AgentStepKind.REVOKE for s in reporter.steps)
 
 
 # ---------------------------------------------------------------- spend cap (ADR-048)
 
 
-class _BurningSearch:
+class _BurningSource:
     """Burns a fixed LLM cost into the meter per call, so a cost cap can be
-    exercised with no paid provider — parity with the loop's BurningSearch."""
+    exercised with no paid provider — parity with the loop's BurningSource."""
 
-    def __init__(self, hits: list[RawSearchHit], meter: UsageMeter, tokens: int) -> None:
-        self._hits = hits
+    def __init__(self, approvals: list[RawApproval], meter: UsageMeter, tokens: int) -> None:
+        self._approvals = approvals
         self._meter = meter
         self._tokens = tokens
-        self.queries: list[str] = []
+        self.chain_ids: list[str] = []
 
-    def search(self, keyword: str) -> list[RawSearchHit]:
-        self.queries.append(keyword)
+    def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
+        self.chain_ids.append(chain_id)
         self._meter.record_llm(self._tokens, 0)
-        return list(self._hits)
+        return list(self._approvals)
 
 
 _BURN_PRICING = Pricing(llm_input_per_mtok=25.0, llm_output_per_mtok=0.0, search_per_call=0.0)
@@ -208,152 +305,136 @@ _BURN_PRICING = Pricing(llm_input_per_mtok=25.0, llm_output_per_mtok=0.0, search
 
 def test_cost_cap_forces_a_finish_step() -> None:
     meter = UsageMeter()
-    guard = SpendGuard(meter, _BURN_PRICING, cap_usd=0.03)  # trips after 2 searches
-    search = _BurningSearch([hit("https://a")], meter, tokens=1_000)  # $0.025 per search
-    policy = ScriptedPolicy([SearchAction(query="q", reason=str(i)) for i in range(5)])
+    guard = SpendGuard(meter, _BURN_PRICING, cap_usd=0.03)  # trips after 2 scans
+    source = _BurningSource([approval("a")], meter, tokens=1_000)  # $0.025 per scan
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason=str(i)) for i in range(5)])
     sink, reporter = RecordingSink(), RecordingReporter()
 
-    run("job-c1", "goal", search, policy, sink, reporter, budget=guard, max_steps=5)
+    run("job-c1", "goal", source, policy, sink, reporter, budget=guard, max_steps=5)
 
-    assert search.queries == ["q", "q"]  # step budget 5 untouched; money stops it
+    assert source.chain_ids == ["1", "1"]  # step budget 5 untouched; money stops it
     assert [s.kind for s in reporter.steps] == [
-        AgentStepKind.SEARCH,
-        AgentStepKind.SEARCH,
+        AgentStepKind.SCAN,
+        AgentStepKind.SCAN,
         AgentStepKind.FINISH,
     ]
     assert "cost" in reporter.steps[-1].reason
     assert sink.delivered == [("job-c1", 1)]
 
 
-def test_cost_cap_skips_the_critique_when_over_budget() -> None:
-    meter = UsageMeter()
-    guard = SpendGuard(meter, _BURN_PRICING, cap_usd=0.02)  # trips after 1 search
-    search = _BurningSearch([hit("https://a"), hit("https://off-topic")], meter, tokens=1_000)
-    policy = ScriptedPolicy(
-        [SearchAction(query="q", reason="1"), SearchAction(query="q", reason="2")]
-    )
-    critic = _ScriptedCritic(Critique(assessment="off", irrelevant_urls=("https://off-topic",)))
-    sink, reporter = RecordingSink(), RecordingReporter()
-
-    results = run(
-        "job-c2", "goal", search, policy, sink, reporter, critic=critic, budget=guard, max_steps=5
-    )
-
-    # The critique node early-returns over budget: no CRITIQUE step, nothing dropped.
-    assert all(s.kind is not AgentStepKind.CRITIQUE for s in reporter.steps)
-    assert {r.url for r in results} == {"https://a", "https://off-topic"}
-
-
 def test_recurring_run_flags_the_delta_and_journals_a_report() -> None:
-    search = MappedSearch({"q": [hit("https://old"), hit("https://fresh")]})
-    policy = ScriptedPolicy([SearchAction(query="q", reason="r"), FinishAction(reason="done")])
+    source = MappedSource({"1": [approval("old"), approval("fresh")]})
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r"), FinishAction(reason="done")])
     sink, reporter = RecordingSink(), RecordingReporter()
 
     results = run(
-        "job-12", "goal", search, policy, sink, reporter, seen_urls={"https://old"}, max_steps=5
+        "job-12", "goal", source, policy, sink, reporter, seen_keys={"1:0xtoken:old"}, max_steps=5
     )
 
-    assert {r.url: r.is_new for r in results} == {"https://old": False, "https://fresh": True}
+    assert {r.spender_address: r.is_new for r in results} == {"old": False, "fresh": True}
     report = reporter.steps[-1]
     assert report.kind is AgentStepKind.REPORT and report.new_hits == 1
 
 
-def test_search_failure_reports_and_propagates() -> None:
-    class ExplodingSearch:
-        def search(self, keyword: str) -> list[RawSearchHit]:
-            raise RuntimeError("provider down")
+def test_scan_failure_reports_and_propagates() -> None:
+    class ExplodingSource:
+        def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
+            raise RuntimeError("GoPlus down")
 
-    policy = ScriptedPolicy([SearchAction(query="q", reason="r")])
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r")])
     sink = RecordingSink()
 
-    with pytest.raises(Exception, match="provider down"):
-        run("job-4", "goal", ExplodingSearch(), policy, sink, RecordingReporter(), max_steps=5)
-    assert sink.failures == [("job-4", "provider down")] or sink.failures[-1][0] == "job-4"
+    with pytest.raises(Exception, match="GoPlus down"):
+        run("job-4", "goal", ExplodingSource(), policy, sink, RecordingReporter(), max_steps=5)
+    assert sink.failures == [("job-4", "GoPlus down")] or sink.failures[-1][0] == "job-4"
 
 
 # ---------------------------------------------------------------- HITL (ADR-032/046)
 
 
 def test_ask_pauses_the_job_without_delivering() -> None:
-    search = MappedSearch({})
-    policy = ScriptedPolicy([AskAction(question="Animal or car?", reason="ambiguous")])
+    source = MappedSource({})
+    policy = ScriptedPolicy([AskAction(question="Which chains?", reason="ambiguous")])
     sink, reporter, clarifier = RecordingSink(), RecordingReporter(), RecordingClarifier()
 
-    outcome = run(
-        "job-9", "jaguar", search, policy, sink, reporter, clarifier=clarifier, max_steps=5
-    )
+    outcome = run("job-9", "goal", source, policy, sink, reporter, clarifier=clarifier, max_steps=5)
 
     assert outcome is None
-    assert clarifier.questions == [("job-9", "Animal or car?")]
+    assert clarifier.questions == [("job-9", "Which chains?")]
     assert sink.delivered == [] and sink.failures == []
 
 
 def test_answer_resumes_the_graph_from_its_checkpoint() -> None:
     # The heart of ADR-046: the run pauses on a question, and the user's answer
-    # resumes the SAME graph — the search done before the pause is preserved,
+    # resumes the SAME graph — the scan done before the pause is preserved,
     # not redone.
     cp = InMemorySaver()
-    search = MappedSearch({"jaguar top speed": [hit("https://spec")]})
+    source = MappedSource({"1": [approval("a")]})
     policy = ScriptedPolicy(
         [
-            AskAction(question="Animal or car?", reason="ambiguous"),
-            SearchAction(query="jaguar top speed", reason="the car, per the user"),
+            AskAction(question="Which chains?", reason="ambiguous"),
+            ScanAction(chain_id="1", reason="ethereum, per the user"),
             FinishAction(reason="done"),
         ]
     )
     sink, reporter, clarifier = RecordingSink(), RecordingReporter(), RecordingClarifier()
 
     paused = run(
-        "job-r", "jaguar", search, policy, sink, reporter, checkpointer=cp, clarifier=clarifier
+        "job-r", "goal", source, policy, sink, reporter, checkpointer=cp, clarifier=clarifier
     )
-    assert paused is None and clarifier.questions == [("job-r", "Animal or car?")]
+    assert paused is None and clarifier.questions == [("job-r", "Which chains?")]
 
     # Same job_id + same checkpointer = resume; the answer flows into the graph.
     results = run(
         "job-r",
-        "jaguar",
-        search,
+        "goal",
+        source,
         policy,
         sink,
         reporter,
         checkpointer=cp,
         clarifier=clarifier,
-        resume_answer="the car",
+        resume_answer="ethereum only",
     )
 
-    assert results is not None and [r.url for r in results] == ["https://spec"]
+    assert results is not None and [r.spender_address for r in results] == ["a"]
     assert sink.delivered == [("job-r", 1)]
-    # The policy was consulted post-answer with the clarification folded in.
-    assert "the car" in policy.last_goal
+    assert "ethereum only" in policy.last_goal
+
+
+def test_ask_without_a_clarifier_degrades_to_finish() -> None:
+    # No `clarifier` wired at all (e.g. workflow-mode-style plumbing): an ask
+    # must not hang the graph waiting on an interrupt nobody can answer.
+    source = MappedSource({"1": [approval("a")]})
+    policy = ScriptedPolicy(
+        [ScanAction(chain_id="1", reason="r"), AskAction(question="hm?", reason="r")]
+    )
+    sink, reporter = RecordingSink(), RecordingReporter()
+
+    outcome = run("job-11", "goal", source, policy, sink, reporter, max_steps=5)
+
+    assert outcome is not None and sink.delivered == [("job-11", 1)]
 
 
 def test_ask_after_an_answer_degrades_to_finish() -> None:
-    search = MappedSearch({"q": [hit("https://a")]})
+    source = MappedSource({"1": [approval("a")]})
     policy = ScriptedPolicy(
-        [SearchAction(query="q", reason="r"), AskAction(question="again?", reason="r")]
+        [ScanAction(chain_id="1", reason="r"), AskAction(question="again?", reason="r")]
     )
     sink, reporter, clarifier = RecordingSink(), RecordingReporter(), RecordingClarifier()
 
     outcome = run(
         "job-10",
         "goal",
-        search,
+        source,
         policy,
         sink,
         reporter,
         clarifier=clarifier,
-        clarification="the car",
+        clarification="ethereum only",
         max_steps=5,
     )
 
     assert outcome is not None and len(outcome) == 1
     assert clarifier.questions == []
     assert reporter.steps[-1].kind is AgentStepKind.FINISH
-
-
-class _ScriptedCritic:
-    def __init__(self, critique: Critique) -> None:
-        self._critique = critique
-
-    def critique(self, goal: str, hits: list[RawSearchHit]) -> Critique:
-        return self._critique

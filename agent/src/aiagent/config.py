@@ -46,13 +46,26 @@ class Settings:
     backend_internal_url: str
     internal_api_token: str
     agent_model_id: str
-    # "live" (Tavily + Claude) or "fake" (deterministic in-process adapters,
-    # no API key needed — e2e tests and keyless local development, ADR-021).
+    # "live" (GoPlus + Claude + KeeperHub) or "fake" (deterministic in-process
+    # adapters, no API key needed — e2e tests and keyless local development,
+    # ADR-021).
     providers: str
-    # Live search engines (ADR-051): one, or several fused by the aggregator.
-    # Values: "tavily" (needs TAVILY_API_KEY), "duckduckgo" (keyless). More than
-    # one is queried concurrently, deduplicated and rank-fused.
-    search_providers: list[str]
+    # Default chains scanned when a job does not name its own scope (ADR-058):
+    # Ethereum, Base, Arbitrum, Polygon — matches KeeperHub's supported chains
+    # (Sepolia excluded by default; add "11155111" for testnet demos).
+    scan_chain_ids: list[str]
+    # GoPlus Security API key (ADR-058): optional — the approval-list and
+    # malicious-address endpoints work keyless at a lower rate limit; set for
+    # sustained/production use. https://gopluslabs.io
+    goplus_api_key: str
+    # KeeperHub execution layer (ADR-058): the org's API base URL and `kh_`
+    # key used for direct on-chain execution (execute_contract_call).
+    keeperhub_api_url: str
+    keeperhub_api_key: str
+    # Safety valve (ADR-058): when true, revocations are submitted with
+    # KeeperHub's `simulate=true` (dry-run, never broadcast) regardless of
+    # tier — for demos/rehearsals without spending real gas.
+    keeperhub_simulate_only: bool
     # LLM backend behind the live adapters (ADR-041): "anthropic" (hosted,
     # needs ANTHROPIC_API_KEY) or "ollama" (local server, no key —
     # AGENT_MODEL_ID then names a local model, e.g. "qwen3:14b").
@@ -97,11 +110,18 @@ class Settings:
             internal_api_token=os.environ.get("INTERNAL_API_TOKEN", "change-me"),
             agent_model_id=os.environ.get("AGENT_MODEL_ID", "claude-opus-4-8"),
             providers=os.environ.get("AGENT_PROVIDERS", "live"),
-            search_providers=[
-                name.strip().lower()
-                for name in os.environ.get("AGENT_SEARCH_PROVIDERS", "tavily").split(",")
-                if name.strip()
+            scan_chain_ids=[
+                chain_id.strip()
+                for chain_id in os.environ.get("AGENT_SCAN_CHAIN_IDS", "1,8453,42161,137").split(
+                    ","
+                )
+                if chain_id.strip()
             ],
+            goplus_api_key=os.environ.get("GOPLUS_API_KEY", ""),
+            keeperhub_api_url=os.environ.get("KEEPERHUB_API_URL", "https://app.keeperhub.com"),
+            keeperhub_api_key=os.environ.get("KEEPERHUB_API_KEY", ""),
+            keeperhub_simulate_only=os.environ.get("KEEPERHUB_SIMULATE_ONLY", "").lower()
+            in ("1", "true", "yes"),
             llm_backend=os.environ.get("AGENT_LLM_BACKEND", "anthropic"),
             llm_base_url=os.environ.get("AGENT_LLM_BASE_URL", "http://localhost:11434"),
             llm_timeout_seconds=float(os.environ.get("AGENT_LLM_TIMEOUT_SECONDS", "60")),

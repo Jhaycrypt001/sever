@@ -4,13 +4,13 @@ use uuid::Uuid;
 
 use crate::domain::job::JobError;
 use crate::domain::ports::{JobDispatcher, JobRepository, PortError};
-use crate::domain::{JobMode, ResearchJob};
+use crate::domain::{JobMode, ScanJob};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
     #[error(transparent)]
     InvalidJob(#[from] JobError),
-    #[error("daily search quota reached ({0} searches per 24h)")]
+    #[error("daily scan quota reached ({0} scans per 24h)")]
     QuotaExceeded(u32),
     #[error("failed to dispatch job to the agent")]
     DispatchFailed,
@@ -21,9 +21,9 @@ pub enum LaunchError {
 pub struct LaunchSearch {
     jobs: Arc<dyn JobRepository>,
     dispatcher: Arc<dyn JobDispatcher>,
-    /// Max searches per user per rolling 24h — every search costs Tavily and
-    /// Anthropic API calls, so this caps the spend a single account can cause
-    /// (ADR-017).
+    /// Max scans per user per rolling 24h — every scan costs GoPlus and
+    /// Anthropic API calls (and, in agent mode, KeeperHub gas), so this caps
+    /// the spend a single account can cause (ADR-017).
     daily_quota: u32,
 }
 
@@ -42,20 +42,20 @@ impl LaunchSearch {
 
     /// Checks the quota, persists the job (status `pending`), then hands it to
     /// the agent. If dispatching fails, the job is kept and marked `failed` so
-    /// the user gets feedback instead of a silently lost search.
+    /// the user gets feedback instead of a silently lost scan.
     pub async fn execute(
         &self,
         user_id: Uuid,
-        keyword: &str,
+        wallet_address: &str,
         mode: JobMode,
-    ) -> Result<ResearchJob, LaunchError> {
+    ) -> Result<ScanJob, LaunchError> {
         let since = chrono::Utc::now() - chrono::Duration::hours(24);
         let used = self.jobs.count_created_since(user_id, since).await?;
         if used >= u64::from(self.daily_quota) {
             return Err(LaunchError::QuotaExceeded(self.daily_quota));
         }
 
-        let mut job = ResearchJob::new(user_id, keyword)?.with_mode(mode);
+        let mut job = ScanJob::new(user_id, wallet_address)?.with_mode(mode);
         self.jobs.insert(&job).await?;
 
         if let Err(err) = self.dispatcher.dispatch(&job, &[]).await {
@@ -76,6 +76,7 @@ mod tests {
     use std::sync::Mutex;
 
     const TEST_QUOTA: u32 = 20;
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
 
     struct RecordingDispatcher {
         dispatched: Mutex<Vec<Uuid>>,
@@ -99,7 +100,7 @@ mod tests {
 
     #[async_trait]
     impl JobDispatcher for RecordingDispatcher {
-        async fn dispatch(&self, job: &ResearchJob, _seen: &[String]) -> Result<(), PortError> {
+        async fn dispatch(&self, job: &ScanJob, _seen: &[String]) -> Result<(), PortError> {
             if self.fail {
                 return Err(PortError("agent unreachable".into()));
             }
@@ -115,7 +116,7 @@ mod tests {
         let launch = LaunchSearch::new(jobs.clone(), dispatcher.clone(), TEST_QUOTA);
 
         let job = launch
-            .execute(Uuid::new_v4(), "rust axum", JobMode::Workflow)
+            .execute(Uuid::new_v4(), ADDR, JobMode::Workflow)
             .await
             .unwrap();
 
@@ -135,7 +136,7 @@ mod tests {
         let user_id = Uuid::new_v4();
 
         let err = launch
-            .execute(user_id, "rust axum", JobMode::Workflow)
+            .execute(user_id, ADDR, JobMode::Workflow)
             .await
             .unwrap_err();
 
@@ -151,7 +152,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_empty_keyword_without_persisting() {
+    async fn rejects_empty_wallet_address_without_persisting() {
         let jobs = Arc::new(InMemoryJobRepository::default());
         let launch = LaunchSearch::new(
             jobs.clone(),
@@ -167,7 +168,7 @@ mod tests {
 
         assert!(matches!(
             err,
-            LaunchError::InvalidJob(JobError::EmptyKeyword)
+            LaunchError::InvalidJob(JobError::EmptyWalletAddress)
         ));
         assert!(jobs.list_for_user(user_id).await.unwrap().is_empty());
     }
@@ -179,15 +180,15 @@ mod tests {
         let user_id = Uuid::new_v4();
 
         launch
-            .execute(user_id, "one", JobMode::Workflow)
+            .execute(user_id, ADDR, JobMode::Workflow)
             .await
             .unwrap();
         launch
-            .execute(user_id, "two", JobMode::Workflow)
+            .execute(user_id, ADDR, JobMode::Workflow)
             .await
             .unwrap();
         let err = launch
-            .execute(user_id, "three", JobMode::Workflow)
+            .execute(user_id, ADDR, JobMode::Workflow)
             .await
             .unwrap_err();
 
@@ -196,7 +197,7 @@ mod tests {
 
         // The quota is per user: another account is unaffected.
         launch
-            .execute(Uuid::new_v4(), "other", JobMode::Workflow)
+            .execute(Uuid::new_v4(), ADDR, JobMode::Workflow)
             .await
             .unwrap();
     }
@@ -205,13 +206,13 @@ mod tests {
     async fn quota_only_counts_the_last_24_hours() {
         let jobs = Arc::new(InMemoryJobRepository::default());
         let user_id = Uuid::new_v4();
-        let mut old_job = ResearchJob::new(user_id, "yesterday").unwrap();
+        let mut old_job = ScanJob::new(user_id, ADDR).unwrap();
         old_job.created_at = chrono::Utc::now() - chrono::Duration::hours(25);
         jobs.insert(&old_job).await.unwrap();
 
         let launch = LaunchSearch::new(jobs, Arc::new(RecordingDispatcher::ok()), 1);
         launch
-            .execute(user_id, "today", JobMode::Workflow)
+            .execute(user_id, ADDR, JobMode::Workflow)
             .await
             .unwrap();
     }

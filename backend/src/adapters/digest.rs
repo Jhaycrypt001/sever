@@ -253,12 +253,13 @@ mod tests {
         Digest {
             recurring_search_id: Uuid::new_v4(),
             job_id: Uuid::new_v4(),
-            keyword: "rust releases".into(),
+            wallet_address: "0x1234567890123456789012345678901234567890".into(),
             new_count: 1,
             new_results: vec![crate::domain::ports::DigestEntry {
-                title: "Rust 1.99".into(),
-                url: "https://ex.com/rust".into(),
-                published_at: None,
+                token_symbol: "USDC".into(),
+                spender_address: "0xbad".into(),
+                tier: crate::domain::RiskTier::Dangerous,
+                revocation_status: crate::domain::RevocationStatus::Revoked,
             }],
         }
     }
@@ -276,8 +277,11 @@ mod tests {
         let (sig, raw) = &entries[0];
         assert!(sig.is_none(), "no signature without a secret");
         let body: serde_json::Value = serde_json::from_str(raw).unwrap();
-        assert_eq!(body["keyword"], "rust releases");
-        assert_eq!(body["new_results"][0]["title"], "Rust 1.99");
+        assert_eq!(
+            body["wallet_address"],
+            "0x1234567890123456789012345678901234567890"
+        );
+        assert_eq!(body["new_results"][0]["token_symbol"], "USDC");
     }
 
     #[tokio::test]

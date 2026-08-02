@@ -2,21 +2,17 @@
 tagged with the OpenTelemetry GenAI conventions and the decision outcome. Driven
 with an in-memory exporter and a fake chat model — no provider, no paid call."""
 
+import httpx
 import pytest
+import respx
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
-from aiagent.adapters.llm import (
-    ActionReply,
-    CritiqueReply,
-    EnrichmentReply,
-    LlmAgentPolicy,
-    LlmHitEnricher,
-    LlmResultCritic,
-)
-from aiagent.domain.models import RawSearchHit
+from aiagent.adapters.keeperhub import KeeperHubApprovalRevoker
+from aiagent.adapters.llm import ActionReply, ExplanationReply, LlmAgentPolicy, LlmThreatIntel
+from aiagent.domain.models import ApprovalFinding, RawApproval, RiskTier
 
 
 class FakeChat:
@@ -55,14 +51,20 @@ def _attrs(exporter: InMemorySpanExporter, name: str) -> dict:
     return dict(spans[0].attributes or {})
 
 
-def a_hit() -> RawSearchHit:
-    return RawSearchHit(title="T", url="https://t", snippet="s", published_at=None)
+def an_approval() -> RawApproval:
+    return RawApproval(
+        chain_id="1",
+        token_address="0xtoken",
+        token_symbol="TKN",
+        spender_address="0xspender",
+        approved_amount="Unlimited",
+    )
 
 
 def test_decide_span_carries_genai_usage_and_the_action(exporter: InMemorySpanExporter) -> None:
     exporter.clear()
     policy = LlmAgentPolicy(
-        FakeChat(ActionReply(action="search", query="q", reason="r")),  # type: ignore[arg-type]
+        FakeChat(ActionReply(action="scan", chain_id="1", reason="r")),  # type: ignore[arg-type]
         model="claude-opus-4-8",
         system="anthropic",
     )
@@ -74,31 +76,54 @@ def test_decide_span_carries_genai_usage_and_the_action(exporter: InMemorySpanEx
     assert attrs["gen_ai.request.model"] == "claude-opus-4-8"
     assert attrs["gen_ai.usage.input_tokens"] == 11
     assert attrs["gen_ai.usage.output_tokens"] == 5
-    assert attrs["aiagent.agent.action"] == "search"
+    assert attrs["aiagent.agent.action"] == "scan"
 
 
-def test_critique_span_records_drops_and_gap(exporter: InMemorySpanExporter) -> None:
+def test_assess_span_sums_batch_usage(exporter: InMemorySpanExporter) -> None:
     exporter.clear()
-    critic = LlmResultCritic(
+    threat_intel = LlmThreatIntel(
         FakeChat(  # type: ignore[arg-type]
-            CritiqueReply(assessment="ok", irrelevant_urls=["https://x"], gap_query="fill this")
+            ExplanationReply(explanation="looks fine"), input_tokens=4, output_tokens=2
         ),
     )
-    critic.critique("goal", [a_hit()])
+    threat_intel.assess_many([an_approval(), an_approval(), an_approval()])
 
-    attrs = _attrs(exporter, "llm critique")
-    assert attrs["aiagent.critic.dropped"] == 1
-    assert attrs["aiagent.critic.has_gap"] is True
-
-
-def test_enrich_span_sums_batch_usage(exporter: InMemorySpanExporter) -> None:
-    exporter.clear()
-    enricher = LlmHitEnricher(
-        FakeChat(EnrichmentReply(summary="s"), input_tokens=4, output_tokens=2),  # type: ignore[arg-type]
-    )
-    enricher.enrich_many([a_hit(), a_hit(), a_hit()])
-
-    attrs = _attrs(exporter, "llm enrich")
+    attrs = _attrs(exporter, "llm assess")
     assert attrs["aiagent.llm.batch_size"] == 3
-    assert attrs["gen_ai.usage.input_tokens"] == 12  # 3 hits * 4
-    assert attrs["gen_ai.usage.output_tokens"] == 6  # 3 hits * 2
+    assert attrs["gen_ai.usage.input_tokens"] == 12  # 3 approvals * 4
+    assert attrs["gen_ai.usage.output_tokens"] == 6  # 3 approvals * 2
+
+
+@respx.mock
+def test_keeperhub_revoke_span_carries_the_finding_and_outcome(
+    exporter: InMemorySpanExporter,
+) -> None:
+    exporter.clear()
+    respx.post("https://app.keeperhub.com/api/execute/contract-call").mock(
+        return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
+    )
+    respx.get("https://app.keeperhub.com/api/execute/exec-1/status").mock(
+        return_value=httpx.Response(
+            200, json={"status": "completed", "transactionHash": "0xabc123"}
+        )
+    )
+    revoker = KeeperHubApprovalRevoker(
+        "https://app.keeperhub.com", "kh_test_key", poll_interval_seconds=0
+    )
+
+    revoker.revoke(
+        ApprovalFinding(
+            chain_id="1",
+            token_address="0xtoken",
+            token_symbol="USDC",
+            spender_address="0xbad",
+            approved_amount="Unlimited",
+            tier=RiskTier.DANGEROUS,
+        )
+    )
+
+    attrs = _attrs(exporter, "keeperhub revoke")
+    assert attrs["aiagent.chain_id"] == "1"
+    assert attrs["aiagent.spender_address"] == "0xbad"
+    assert attrs["aiagent.tier"] == "dangerous"
+    assert attrs["aiagent.revocation_status"] == "revoked"

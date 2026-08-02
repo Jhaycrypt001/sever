@@ -43,13 +43,15 @@ Manual setup and deployment steps live in [SETUP.md](SETUP.md).
       end to end, `AgentPolicy`/`StepReporter` ports, step budget
       (`AGENT_MAX_STEPS`), `agent_steps` journal streamed over SSE, two demo
       blocks in the frontend.
-- [x] **Result self-critique (ADR-031)** — done: a `ResultCritic` port reviews
-      the hits before delivery (verdict journaled as a `critique` step,
-      off-topic URLs dropped, at most one budget-bounded repair search).
+- [x] ~~**Result self-critique (ADR-031)**~~ — superseded by ADR-058: the
+      `ResultCritic`/`critique` step had no equivalent once the domain pivoted
+      to approval scanning (a fetched approval has no "off-topic" judgment to
+      make); dropped rather than ported.
 - [x] **Recurring searches with memory (ADR-033)** — done: saved searches
       re-run by the backend scheduler tick (Celery beat rejected — see the
-      ADR), `seen_urls` memory, `is_new` flags end to end, and a `report`
-      journal step with the delta verdict.
+      ADR), memory of prior findings (`seen_approval_keys` since the ADR-058
+      pivot; `seen_urls` originally), `is_new` flags end to end, and a
+      `report` journal step with the delta verdict.
 - [x] **Digest webhooks (ADR-036)** — done: optional `webhook_url` per
       recurring search; runs with new results POST a digest (best-effort,
       shape pinned by `contracts/digest-webhook.json`). An e-mail sender is

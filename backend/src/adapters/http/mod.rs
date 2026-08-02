@@ -37,8 +37,8 @@ use crate::domain::ports::{
     RefreshTokenRepository, SecurityAudit, TokenService, UserRepository,
 };
 use crate::domain::{
-    AgentStep, DateConfidence, EventType, JobMode, JobStatus, JobUsage, RecurringSearch,
-    ResearchJob, SearchResult, SecurityEvent, SecurityEventKind,
+    AgentStep, ApprovalFinding, JobMode, JobStatus, JobUsage, RecurringSearch, RevocationStatus,
+    RiskTier, ScanJob, SecurityEvent, SecurityEventKind,
 };
 
 /// Name of the HttpOnly cookie carrying the refresh token (ADR-008).
@@ -232,18 +232,18 @@ impl utoipa::Modify for SecurityAddon {
         AccessTokenResponse,
         AccountResponse,
         ErrorResponse,
-        SearchResult,
+        ApprovalFinding,
         AgentStep,
         JobUsage,
         JobStatus,
         JobMode,
-        EventType,
-        DateConfidence,
+        RiskTier,
+        RevocationStatus,
     )),
     tags(
         (name = "auth", description = "Registration, login, session refresh (ADR-008)"),
-        (name = "searches", description = "Launch and read searches (ADR-030/032)"),
-        (name = "recurring", description = "Scheduled recurring searches (ADR-033)"),
+        (name = "searches", description = "Launch and read approval scans (ADR-030/032/058)"),
+        (name = "recurring", description = "Scheduled recurring scans (ADR-033)"),
     ),
 )]
 pub struct ApiDoc;
@@ -437,7 +437,7 @@ struct CredentialsRequest {
 
 #[derive(Deserialize, ToSchema)]
 struct CreateSearchRequest {
-    keyword: String,
+    wallet_address: String,
     // Workflow (fixed pipeline) or agent (decision loop, ADR-030); defaulted
     // so pre-ADR-030 clients keep working.
     #[serde(default)]
@@ -447,7 +447,7 @@ struct CreateSearchRequest {
 #[derive(Serialize, ToSchema)]
 struct JobView {
     id: Uuid,
-    keyword: String,
+    wallet_address: String,
     mode: JobMode,
     status: JobStatus,
     error: Option<String>,
@@ -462,11 +462,11 @@ struct JobView {
     completed_at: Option<DateTime<Utc>>,
 }
 
-impl From<&ResearchJob> for JobView {
-    fn from(job: &ResearchJob) -> Self {
+impl From<&ScanJob> for JobView {
+    fn from(job: &ScanJob) -> Self {
         Self {
             id: job.id,
-            keyword: job.keyword.clone(),
+            wallet_address: job.wallet_address.clone(),
             mode: job.mode,
             status: job.status,
             error: job.error.clone(),
@@ -482,7 +482,7 @@ impl From<&ResearchJob> for JobView {
 
 #[derive(Deserialize, ToSchema)]
 struct CreateRecurringRequest {
-    keyword: String,
+    wallet_address: String,
     #[serde(default)]
     mode: JobMode,
     interval_minutes: u32,
@@ -494,7 +494,7 @@ struct CreateRecurringRequest {
 #[derive(Serialize, ToSchema)]
 struct RecurringView {
     id: Uuid,
-    keyword: String,
+    wallet_address: String,
     mode: JobMode,
     interval_minutes: u32,
     webhook_url: Option<String>,
@@ -506,7 +506,7 @@ impl From<&RecurringSearch> for RecurringView {
     fn from(search: &RecurringSearch) -> Self {
         Self {
             id: search.id,
-            keyword: search.keyword.clone(),
+            wallet_address: search.wallet_address.clone(),
             mode: search.mode,
             interval_minutes: search.interval_minutes,
             webhook_url: search.webhook_url.clone(),
@@ -518,7 +518,7 @@ impl From<&RecurringSearch> for RecurringView {
 
 #[derive(Deserialize)]
 struct ResultsRequest {
-    results: Vec<SearchResult>,
+    results: Vec<ApprovalFinding>,
 }
 
 #[derive(Deserialize)]
@@ -651,8 +651,8 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     security(("bearer" = [])),
     request_body = CreateSearchRequest,
     responses(
-        (status = 202, description = "Search launched", body = JobCreatedResponse),
-        (status = 422, description = "Empty keyword", body = ErrorResponse),
+        (status = 202, description = "Scan launched", body = JobCreatedResponse),
+        (status = 422, description = "Invalid wallet address", body = ErrorResponse),
         (status = 429, description = "Daily quota exceeded (ADR-017)", body = ErrorResponse)))]
 async fn create_search(
     State(state): State<AppState>,
@@ -662,7 +662,7 @@ async fn create_search(
 ) -> Response {
     match state
         .launch
-        .execute(user_id, &body.keyword, body.mode)
+        .execute(user_id, &body.wallet_address, body.mode)
         .await
     {
         Ok(job) => (StatusCode::ACCEPTED, Json(json!({ "job_id": job.id }))).into_response(),
@@ -711,9 +711,9 @@ async fn list_searches(State(state): State<AppState>, AuthUser(user_id): AuthUse
     security(("bearer" = [])),
     request_body = CreateRecurringRequest,
     responses(
-        (status = 201, description = "Recurring search created", body = RecurringView),
-        (status = 422, description = "Invalid keyword or interval", body = ErrorResponse),
-        (status = 429, description = "Too many recurring searches", body = ErrorResponse)))]
+        (status = 201, description = "Recurring scan created", body = RecurringView),
+        (status = 422, description = "Invalid wallet address or interval", body = ErrorResponse),
+        (status = 429, description = "Too many recurring scans", body = ErrorResponse)))]
 async fn create_recurring(
     State(state): State<AppState>,
     AuthUser(user_id): AuthUser,
@@ -723,7 +723,7 @@ async fn create_recurring(
         .recurring
         .create(
             user_id,
-            &body.keyword,
+            &body.wallet_address,
             body.mode,
             body.interval_minutes,
             body.webhook_url.as_deref(),
@@ -829,7 +829,7 @@ async fn answer_search(
 struct JobDetailView {
     #[serde(flatten)]
     job: JobView,
-    results: Vec<SearchResult>,
+    results: Vec<ApprovalFinding>,
     steps: Vec<AgentStep>,
 }
 
@@ -837,8 +837,8 @@ struct JobDetailView {
 /// stream (ADR-026) so both surfaces always carry the same shape. Public so the
 /// cross-language contract test (ADR-049) can pin its exact wire shape.
 pub fn job_detail_json(
-    job: &ResearchJob,
-    results: &[SearchResult],
+    job: &ScanJob,
+    results: &[ApprovalFinding],
     steps: &[AgentStep],
 ) -> serde_json::Value {
     serde_json::to_value(JobDetailView {

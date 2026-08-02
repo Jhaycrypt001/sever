@@ -14,12 +14,17 @@ use backend::domain::ports::{
     JobRepository, RecurringSearchRepository, RefreshTokenRepository, SecurityAudit, UserRepository,
 };
 use backend::domain::{
-    AgentStep, DateConfidence, JobMode, JobStatus, RecurringSearch, RefreshToken, ResearchJob,
-    SearchResult, SecurityEvent, SecurityEventKind, User,
+    AgentStep, ApprovalFinding, JobMode, JobStatus, RecurringSearch, RefreshToken,
+    RevocationStatus, RiskTier, ScanJob, SecurityEvent, SecurityEventKind, User,
 };
-use chrono::{TimeZone, Utc};
+use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
+
+const ADDR: &str = "0x1234567890123456789012345678901234567890";
+const ADDR_A: &str = "0x1111111111111111111111111111111111111a";
+const ADDR_B: &str = "0x2222222222222222222222222222222222222b";
+const ADDR_C: &str = "0x3333333333333333333333333333333333333c";
 
 async fn pool() -> Option<PgPool> {
     let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -80,7 +85,7 @@ async fn job_lifecycle_roundtrip() {
     let user = insert_user(&pool).await;
     let jobs = PostgresJobRepository::new(pool);
 
-    let mut job = ResearchJob::new(user.id, "rust sqlx").unwrap();
+    let mut job = ScanJob::new(user.id, ADDR).unwrap();
     jobs.insert(&job).await.unwrap();
     assert_eq!(jobs.find(job.id).await.unwrap().as_ref(), Some(&job));
 
@@ -100,16 +105,16 @@ async fn list_for_user_is_scoped_and_newest_first() {
     let other = insert_user(&pool).await;
     let jobs = PostgresJobRepository::new(pool);
 
-    let first = ResearchJob::new(user.id, "first").unwrap();
-    let second = ResearchJob::new(user.id, "second").unwrap();
-    let foreign = ResearchJob::new(other.id, "not mine").unwrap();
+    let first = ScanJob::new(user.id, ADDR_A).unwrap();
+    let second = ScanJob::new(user.id, ADDR_B).unwrap();
+    let foreign = ScanJob::new(other.id, ADDR_C).unwrap();
     for job in [&first, &second, &foreign] {
         jobs.insert(job).await.unwrap();
     }
 
     let listed = jobs.list_for_user(user.id).await.unwrap();
-    let keywords: Vec<&str> = listed.iter().map(|j| j.keyword.as_str()).collect();
-    assert_eq!(keywords, vec!["second", "first"]);
+    let addresses: Vec<&str> = listed.iter().map(|j| j.wallet_address.as_str()).collect();
+    assert_eq!(addresses, vec![ADDR_B, ADDR_A]);
 }
 
 #[tokio::test]
@@ -240,10 +245,10 @@ async fn count_created_since_scopes_by_user_and_window() {
     let other = insert_user(&pool).await;
     let jobs = PostgresJobRepository::new(pool);
 
-    let recent = ResearchJob::new(user.id, "recent").unwrap();
-    let mut old = ResearchJob::new(user.id, "old").unwrap();
+    let recent = ScanJob::new(user.id, ADDR).unwrap();
+    let mut old = ScanJob::new(user.id, ADDR).unwrap();
     old.created_at = Utc::now() - chrono::Duration::hours(25);
-    let foreign = ResearchJob::new(other.id, "foreign").unwrap();
+    let foreign = ScanJob::new(other.id, ADDR).unwrap();
     for job in [&recent, &old, &foreign] {
         jobs.insert(job).await.unwrap();
     }
@@ -258,15 +263,15 @@ async fn list_unfinished_older_than_feeds_the_reaper() {
     let user = insert_user(&pool).await;
     let jobs = PostgresJobRepository::new(pool);
 
-    let mut stale_pending = ResearchJob::new(user.id, "stale pending").unwrap();
+    let mut stale_pending = ScanJob::new(user.id, ADDR).unwrap();
     stale_pending.created_at = Utc::now() - chrono::Duration::hours(1);
-    let mut stale_running = ResearchJob::new(user.id, "stale running").unwrap();
+    let mut stale_running = ScanJob::new(user.id, ADDR).unwrap();
     stale_running.created_at = Utc::now() - chrono::Duration::hours(1);
     stale_running.start();
-    let mut old_completed = ResearchJob::new(user.id, "old completed").unwrap();
+    let mut old_completed = ScanJob::new(user.id, ADDR).unwrap();
     old_completed.created_at = Utc::now() - chrono::Duration::hours(1);
     old_completed.complete();
-    let fresh = ResearchJob::new(user.id, "fresh").unwrap();
+    let fresh = ScanJob::new(user.id, ADDR).unwrap();
     for job in [&stale_pending, &stale_running, &old_completed, &fresh] {
         jobs.insert(job).await.unwrap();
     }
@@ -285,47 +290,49 @@ async fn results_roundtrip_with_replace_semantics() {
     let Some(pool) = pool().await else { return };
     let user = insert_user(&pool).await;
     let jobs = PostgresJobRepository::new(pool);
-    let job = ResearchJob::new(user.id, "keyword").unwrap();
+    let job = ScanJob::new(user.id, ADDR).unwrap();
     jobs.insert(&job).await.unwrap();
 
-    let result = |title: &str, day: Option<u32>| SearchResult {
-        title: title.into(),
-        url: format!("https://example.com/{title}"),
-        snippet: "snippet".into(),
-        published_at: day.map(|d| Utc.with_ymd_and_hms(2026, 6, d, 0, 0, 0).unwrap()),
-        date_confidence: if day.is_some() {
-            DateConfidence::High
-        } else {
-            DateConfidence::Unknown
-        },
-        event_type: backend::domain::EventType::Release,
-        summary: Some(format!("summary of {title}")),
+    let finding = |token_symbol: &str, spender: &str, tier: RiskTier| ApprovalFinding {
+        chain_id: "1".into(),
+        token_address: "0xtoken000000000000000000000000000000000".into(),
+        token_symbol: token_symbol.into(),
+        spender_address: spender.into(),
+        spender_name: Some("Some Spender".into()),
+        approved_amount: "Unlimited".into(),
+        tier,
+        malicious_behavior: vec!["phishing_activities".into()],
+        explanation: Some("explanation".into()),
         is_new: true,
+        revocation_status: RevocationStatus::NotAttempted,
+        revocation_tx_hash: None,
         raw: serde_json::json!({"source": "test"}),
     };
 
-    jobs.store_results(job.id, &[result("stale", Some(1))])
+    jobs.store_results(job.id, &[finding("STALE", ADDR_A, RiskTier::Safe)])
         .await
         .unwrap();
     // Worker re-delivery replaces, never duplicates.
     jobs.store_results(
         job.id,
         &[
-            result("old", Some(2)),
-            result("no-date", None),
-            result("new", Some(20)),
+            finding("USDC", ADDR_A, RiskTier::Dangerous),
+            finding("WETH", ADDR_B, RiskTier::Watch),
         ],
     )
     .await
     .unwrap();
 
-    let stored = jobs.results_for(job.id).await.unwrap();
-    let titles: Vec<&str> = stored.iter().map(|r| r.title.as_str()).collect();
-    assert_eq!(titles, vec!["new", "old", "no-date"]);
+    let mut stored = jobs.results_for(job.id).await.unwrap();
+    stored.sort_by(|a, b| a.token_symbol.cmp(&b.token_symbol));
+    let symbols: Vec<&str> = stored.iter().map(|r| r.token_symbol.as_str()).collect();
+    assert_eq!(symbols, vec!["USDC", "WETH"]);
     assert_eq!(stored[0].raw["source"], "test");
-    // Timeline enrichment roundtrip (ADR-027).
-    assert_eq!(stored[0].event_type, backend::domain::EventType::Release);
-    assert_eq!(stored[0].summary.as_deref(), Some("summary of new"));
+    // Rich fields roundtrip (ADR-058).
+    assert_eq!(stored[0].tier, RiskTier::Dangerous);
+    assert_eq!(stored[0].malicious_behavior, vec!["phishing_activities"]);
+    assert_eq!(stored[0].explanation.as_deref(), Some("explanation"));
+    assert_eq!(stored[0].spender_name.as_deref(), Some("Some Spender"));
 }
 
 /// Agent mode + journal roundtrip (ADR-030): the mode survives persistence and
@@ -336,7 +343,7 @@ async fn agent_mode_and_steps_roundtrip() {
     let user = insert_user(&pool).await;
     let jobs = PostgresJobRepository::new(pool);
 
-    let job = ResearchJob::new(user.id, "agentic")
+    let job = ScanJob::new(user.id, ADDR)
         .unwrap()
         .with_mode(JobMode::Agent);
     jobs.insert(&job).await.unwrap();
@@ -346,12 +353,12 @@ async fn agent_mode_and_steps_roundtrip() {
     let step = |seq: i32, kind: &str| AgentStep {
         seq,
         kind: kind.into(),
-        detail: "agentic".into(),
+        detail: "1".into(),
         reason: "because".into(),
         new_hits: 3,
     };
-    jobs.append_step(job.id, &step(1, "search")).await.unwrap();
-    jobs.append_step(job.id, &step(1, "search")).await.unwrap(); // Celery retry
+    jobs.append_step(job.id, &step(1, "scan")).await.unwrap();
+    jobs.append_step(job.id, &step(1, "scan")).await.unwrap(); // Celery retry
     jobs.append_step(job.id, &step(2, "finish")).await.unwrap();
 
     let steps = jobs.steps_for(job.id).await.unwrap();
@@ -360,7 +367,7 @@ async fn agent_mode_and_steps_roundtrip() {
             .iter()
             .map(|s| (s.seq, s.kind.as_str(), s.new_hits))
             .collect::<Vec<_>>(),
-        vec![(1, "search", 3), (2, "finish", 3)]
+        vec![(1, "scan", 3), (2, "finish", 3)]
     );
 }
 
@@ -371,7 +378,7 @@ async fn recurring_search_roundtrip_due_and_memory() {
     let recurring_repo = PostgresRecurringSearchRepository::new(pool.clone());
     let jobs = PostgresJobRepository::new(pool.clone());
 
-    let rs = RecurringSearch::new(user.id, "rust releases", JobMode::Agent, 60, None).unwrap();
+    let rs = RecurringSearch::new(user.id, ADDR, JobMode::Agent, 60, None).unwrap();
     recurring_repo.insert(&rs).await.unwrap();
 
     // Roundtrip + due immediately (never run).
@@ -394,28 +401,40 @@ async fn recurring_search_roundtrip_due_and_memory() {
         .any(|s| s.id == rs.id));
 
     // A linked run delivers results: they become the memory of the next run.
-    let job = ResearchJob::new(user.id, "rust releases")
+    let job = ScanJob::new(user.id, ADDR)
         .unwrap()
         .with_mode(JobMode::Agent)
         .with_recurring(rs.id);
     jobs.insert(&job).await.unwrap();
-    let result = |url: &str| SearchResult {
-        title: "t".into(),
-        url: url.into(),
-        snippet: "s".into(),
-        published_at: None,
-        date_confidence: DateConfidence::Unknown,
-        event_type: backend::domain::EventType::default(),
-        summary: None,
+    let finding = |spender: &str| ApprovalFinding {
+        chain_id: "1".into(),
+        token_address: "0xtoken000000000000000000000000000000000".into(),
+        token_symbol: "TKN".into(),
+        spender_address: spender.into(),
+        spender_name: None,
+        approved_amount: "Unlimited".into(),
+        tier: RiskTier::Watch,
+        malicious_behavior: vec![],
+        explanation: None,
         is_new: true,
+        revocation_status: RevocationStatus::NotAttempted,
+        revocation_tx_hash: None,
         raw: serde_json::Value::Null,
     };
-    jobs.store_results(job.id, &[result("https://a"), result("https://b")])
+    jobs.store_results(job.id, &[finding(ADDR_A), finding(ADDR_B)])
         .await
         .unwrap();
-    let mut urls = jobs.recent_urls_for_recurring(rs.id, 200).await.unwrap();
-    urls.sort();
-    assert_eq!(urls, vec!["https://a".to_string(), "https://b".to_string()]);
+    let mut keys = jobs
+        .recent_approval_keys_for_recurring(rs.id, 200)
+        .await
+        .unwrap();
+    keys.sort();
+    let mut expected = vec![
+        format!("1:0xtoken000000000000000000000000000000000:{ADDR_A}"),
+        format!("1:0xtoken000000000000000000000000000000000:{ADDR_B}"),
+    ];
+    expected.sort();
+    assert_eq!(keys, expected);
     // The stored job kept its recurring link and the is_new flag roundtrips.
     let stored = jobs.find(job.id).await.unwrap().unwrap();
     assert_eq!(stored.recurring_search_id, Some(rs.id));
@@ -434,7 +453,7 @@ async fn usage_accumulates_and_survives_lifecycle_updates() {
     let Some(pool) = pool().await else { return };
     let user = insert_user(&pool).await;
     let jobs = PostgresJobRepository::new(pool.clone());
-    let mut job = ResearchJob::new(user.id, "usage").unwrap();
+    let mut job = ScanJob::new(user.id, ADDR).unwrap();
     jobs.insert(&job).await.unwrap();
 
     let attempt = backend::domain::JobUsage {

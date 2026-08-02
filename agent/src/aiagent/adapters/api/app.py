@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from aiagent.config import Settings, forbid_placeholders
 from aiagent.logging_setup import configure_logging
-from aiagent.tasks import run_research_task
+from aiagent.tasks import run_scan_task
 from aiagent.telemetry import configure_telemetry
 
 configure_logging()
@@ -42,17 +42,17 @@ if TELEMETRY_ENABLED:
 
 class TaskRequest(BaseModel):
     job_id: str
-    keyword: str
-    # "workflow" (fixed pipeline) or "agent" (decision loop, ADR-030); the
-    # default keeps pre-ADR-030 backends compatible.
+    wallet_address: str
+    # "workflow" (fixed pipeline) or "agent" (decision loop + auto-revoke,
+    # ADR-030/058); the default keeps pre-ADR-058 backends compatible.
     mode: str = "workflow"
     # The user's answer to the agent's clarification question (ADR-032);
     # only set when a paused job is re-dispatched.
     clarification: str | None = None
-    # Recurring-search run (ADR-033): when true the agent flags the delta
-    # against seen_urls (empty on the first run) and journals a report.
+    # Recurring-scan run (ADR-033): when true the agent flags the delta
+    # against seen_approval_keys (empty on the first run) and journals a report.
     recurring: bool = False
-    seen_urls: list[str] = []
+    seen_approval_keys: list[str] = []
 
 
 @app.get("/healthz")
@@ -72,14 +72,14 @@ def enqueue_task(
         raise HTTPException(status_code=401, detail="invalid or missing internal token")
 
     request_id = x_request_id or body.job_id
-    run_research_task.delay(
+    run_scan_task.delay(
         body.job_id,
-        body.keyword,
+        body.wallet_address,
         request_id=request_id,
         mode=body.mode,
         clarification=body.clarification,
         recurring=body.recurring,
-        seen_urls=body.seen_urls,
+        seen_approval_keys=body.seen_approval_keys,
     )
     response.headers["X-Request-Id"] = request_id
     logger.info(

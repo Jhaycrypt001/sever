@@ -11,7 +11,7 @@
 > is part of the change. Implementation gaps are marked *(planned)* here and
 > tracked in `ROADMAP.md`.
 
-Last updated: 2026-07-17
+Last updated: 2026-08-02
 
 **Language convention**: all documentation, code, comments, commit messages, and
 identifiers in this project are written in **English only**.
@@ -20,12 +20,19 @@ identifiers in this project are written in **English only**.
 
 ## 1. Project goal
 
-Boilerplate for building AI agents:
+"Approval Firewall": an agent that finds and revokes dangerous ERC-20 token
+approvals for real, onchain, through KeeperHub (ADR-058 — this fork's pivot
+of an original web-research boilerplate; see that ADR for the full rationale
+and what changed).
 
-- A user creates an account on a website.
-- They enter a **keyword** and launch an AI agent.
-- The agent searches the web for information about that keyword.
-- Results are **ranked by publication date** of the source.
+- A user creates an account and submits a **wallet address**.
+- The agent scans that wallet's outstanding token approvals across chains
+  (GoPlus Security) and classifies each spender **Safe / Watch / Dangerous**
+  with a deterministic function — never an LLM judgment call.
+- Every **Dangerous** approval is **auto-revoked**: a real transaction
+  executed through KeeperHub's direct-execution API. Watch/Safe findings are
+  only surfaced for the user to act on manually.
+- Findings are **ranked most-dangerous-first**.
 
 ## 2. Overview
 
@@ -44,19 +51,20 @@ aiagent_boilerplate/
 
 ```
 Vue (SPA)
-  │  POST /api/searches {keyword}          (JWT)
+  │  POST /api/searches {wallet_address}   (JWT)
   ▼
 Axum (Rust) ── persists the job (PostgreSQL, status=pending)
-  │  POST /tasks {job_id, keyword}         (internal HTTP)
+  │  POST /tasks {job_id, wallet_address}  (internal HTTP)
   ▼
 FastAPI (Python) ── enqueues via Celery
   │
   ▼
 Redis (broker) ──▶ Celery worker ── LangChain agent
                         │   0. POST /internal/jobs/{id}/started (→ running)
-                        │   1. web search (Tavily)
-                        │   2. date extraction/normalization
-                        │   3. sort by publication date
+                        │   1. fetch approvals + threat intel (GoPlus)
+                        │   2. classify risk tier (deterministic, ADR-058)
+                        │   3. auto-revoke DANGEROUS findings (KeeperHub)
+                        │   4. sort most-dangerous-first
                         ▼
                    POST /internal/jobs/{id}/results  ──▶ Axum ── persists
                                                               ▲
@@ -81,7 +89,7 @@ components, and a single docker-compose file.
 
 ```
 backend/src/
-├── domain/          # Entities (User, ResearchJob, SearchResult) + pure business logic
+├── domain/          # Entities (User, ScanJob, ApprovalFinding — ADR-058) + pure business logic
 │   └── ports.rs     # Traits: UserRepository, JobRepository, JobDispatcher,
 │                    #         PasswordHasher, TokenService
 ├── application/     # Use cases: RegisterUser, LoginUser, LaunchSearch,
@@ -1834,6 +1842,136 @@ Tested end-to-end with fakes: the audit roundtrip + retention purge (in-memory +
 Postgres), the reuse event (`RefreshSession`), and the HTTP throttle + audit
 (three logins against a cap-of-2, asserting the `429` and the recorded events).
 
+### ADR-058 — Pivot: onchain approval-risk scanning and auto-revocation via KeeperHub (decided 2026-08-02, revisits ADR-002/006/011/025/030/032/033/036/049)
+
+**Context**: this fork repurposes the web-research boilerplate for the
+KeeperHub "Last Mile" hackathon into a concrete, immediately-usable safety
+tool ("Approval Firewall"): a user submits a wallet address, the agent scans
+its outstanding ERC-20 **token approvals** across chains for malicious or
+risky spenders, and — for the DANGEROUS tier only — **auto-revokes** the
+approval as a real onchain transaction through KeeperHub's direct-execution
+API. Every port from the original boilerplate is reused; only the domain
+model, two outbound adapters, and the field names on the existing contracts
+change. The hexagonal boundaries (ADR-002), the worker-never-touches-the-DB
+rule (ADR-006), and the fixture-pinned contract (ADR-025/049) all hold
+unchanged.
+
+**Decision**:
+
+1. **Domain rename, not a new domain.** `ResearchJob` → `ScanJob`
+   (`keyword: String` → `wallet_address: String`, validated as `0x` + 40 hex
+   chars — `is_valid_evm_address`, Rust and the same shape check in Python);
+   `SearchResult` → `ApprovalFinding` (`chain_id`, `token_address`,
+   `token_symbol`, `spender_address`, `spender_name`, `approved_amount`,
+   `tier`, `malicious_behavior: Vec<String>`, `explanation`, `is_new`,
+   `revocation_status`, `revocation_tx_hash`, `raw`). Migration `0011`
+   **renames** `research_jobs` → `scan_jobs` (+ column, + indices) and
+   `recurring_searches.keyword` → `wallet_address` in place (job/user history
+   survives); `search_results` is dropped and replaced by `approval_findings`
+   since its shape has no equivalent in the old table (title/url/snippet/date
+   have no approval-risk analog). `EventType`/`DateConfidence` (ADR-027) are
+   removed with no replacement — an approval finding has no publication date
+   to classify.
+2. **`RiskTier` is a closed, deterministic vocabulary — never an LLM
+   score.** `Safe` / `Watch` / `Dangerous` is assigned by a pure function,
+   `classify_risk(approval)`, reading GoPlus's own verified signals
+   (`malicious_address`/`malicious_behavior` on the token, `is_open_source` on
+   the spender) — never by prompting a model. This is a safety property, not
+   a style choice: the LLM (`LlmThreatIntel`) only ever produces the
+   human-readable `explanation` string; a hallucinated judgment can never
+   upgrade or downgrade what gets auto-revoked. The Rust backend stores and
+   re-serves the tier verbatim — it has no `classify_risk` of its own and
+   never recomputes one.
+3. **New outbound port + adapter: `ApprovalSource`.** `GoPlusApprovalSource`
+   calls GoPlus Security's `token_approval_security` endpoint (keyless,
+   rate-limited; `GOPLUS_API_KEY` optional for sustained use) and combines the
+   token-level and spender-level malicious signals into one `RawApproval` per
+   (chain, token, spender). Reuses the existing `ThreatIntel` port
+   unchanged — only its live adapter (`LlmThreatIntel`) and its fake
+   (`FakeThreatIntel`, still delegating the tier to `classify_risk` for
+   determinism, ADR-021) changed.
+4. **New outbound port: `ApprovalRevoker`.** The only place the agent writes
+   to the world. `KeeperHubApprovalRevoker` calls KeeperHub's direct-execution
+   REST API (`POST /api/execute/contract-call`, Bearer `kh_...`) and is
+   engineered around three of its issue-tracker bugs from day one: (a)
+   `chainId`/`functionArgs`/`gasLimitMultiplier` must be sent as **JSON
+   strings**, not numbers (#1841); (b) a **reused `Idempotency-Key` caches a
+   failure** — a fresh UUID is minted per attempt, never per finding (#1840);
+   (c) the POST response **never carries `transactionHash`** — the adapter
+   always polls `GET /api/execute/{executionId}/status` until `completed` or
+   `failed` (#1784). `KEEPERHUB_SIMULATE_ONLY` (default `false`) forces every
+   call to KeeperHub's `simulate=true` dry-run regardless of tier, for
+   rehearsals without spending real gas. `FakeApprovalRevoker` "succeeds" with
+   a synthetic tx hash under `AGENT_PROVIDERS=fake` — no test may trigger a
+   real revocation (extends the ADR-012 rule: live/paid-service tests are
+   opt-in via `RUN_LIVE_TESTS=1`, but KeeperHub execution has **no** opt-in
+   test path at all, live or fake-gated, by design).
+5. **Auto-revoke gate: DANGEROUS only, unconditional.**
+   `approvals_to_auto_revoke(findings)` filters to the DANGEROUS tier and
+   nothing else decides whether a revoke fires — both orchestrators (the
+   ADR-046 LangGraph graph and the ADR-030 hand-rolled loop) call the same
+   shared `revoke_dangerous()` (`application/execute_revocations.py`) right
+   after the scan/triage step, before `flag_new`/report. WATCH and SAFE
+   findings are only *surfaced*, never acted on automatically — revoking them
+   would need a second, blocking confirmation, and ADR-032's job model
+   supports exactly **one** clarification slot per job; stacking a second
+   synchronous question would need new backend contract fields for a
+   secondary use case (deferred, tracked in `ROADMAP.md` as a frontend-driven
+   manual revoke instead of a second HITL prompt).
+6. **Scope cut: ADR-031's self-critique node is dropped, not ported.** It
+   existed to judge "does this search hit actually answer the goal" —
+   off-topic URLs have no equivalent in approval scanning (a fetched approval
+   either exists on the chain queried or it does not; there is nothing to
+   critique). The LangGraph graph (ADR-046) is simplified to
+   `decide → scan → ask → finalize`, with the revoke step folded into
+   `finalize` via `revoke_dangerous()`. `ROADMAP.md`'s ADR-031 line is marked
+   superseded rather than rewritten.
+7. **Contracts** (ADR-025/049, fixtures updated, both sides asserted):
+   `POST /api/searches` and `POST /api/recurring` take `wallet_address`
+   instead of `keyword`; `POST /tasks` carries `wallet_address` and
+   `seen_approval_keys` (was `seen_urls`) — the memory key is now
+   `"{chain_id}:{token_address}:{spender_address}"` lowercased
+   (`ApprovalFinding::approval_key`), computed by
+   `recent_approval_keys_for_recurring`; `POST /internal/jobs/{id}/results`
+   carries `results: ApprovalFinding[]`; the digest webhook (ADR-036) carries
+   `wallet_address` and `new_results: {token_symbol, spender_address, tier,
+   revocation_status}[]` instead of `{title, url, published_at}[]`.
+8. **Config**: `AGENT_PROVIDERS` defaults to `live` combining GoPlus (keyless-
+   capable) + Anthropic (explanation text only) + KeeperHub (required key).
+   `agent-worker`'s fail-fast startup check (ADR-020) now requires
+   `KEEPERHUB_API_KEY` unconditionally outside `fake` mode — a worker that
+   cannot execute a revocation is misconfigured for this agent, whichever job
+   arrives first. `AGENT_SCAN_CHAIN_IDS` (default `1,8453,42161,137`) replaces
+   `AGENT_SEARCH_PROVIDERS`; Tavily/DuckDuckGo and the `aggregating_search`
+   adapter (ADR-051) are removed with no replacement — there is no "search
+   the web" step left in this domain.
+9. **Audit trail, extending the three observability pillars (ADR-018/029/050)
+   to the one call that moves money onchain.** `KeeperHubApprovalRevoker`
+   wraps every attempt in a `keeperhub revoke` span (chain/spender/tier/outcome
+   attributes, no-op unless `OTEL_EXPORTER_OTLP_ENDPOINT` is set — same pattern
+   as `llm_span`), records `aiagent.revocations` (counter, by tier/outcome) and
+   `aiagent.revocation.call.duration` (histogram) — new instruments in
+   `metrics.py` — and logs a structured `"revocation attempt"` line for
+   **every** outcome, not just failures, so a spike in failed revocations is
+   greppable/alertable without a DB query. The Rust side logs a matching
+   `"scan completed"` line in `IngestResults::complete` (finding/dangerous/
+   revoked counts) at the moment a scan's findings land in the system of
+   record — the durable half of the audit trail is the `approval_findings`
+   rows themselves (tier, revocation_status, revocation_tx_hash), kept forever
+   per job; these logs/spans/metrics are the searchable, real-time layer on
+   top, not a replacement for the DB rows.
+
+Tested end-to-end with fakes: `classify_risk` unit tests for all three tiers,
+`GoPlusApprovalSource`/`KeeperHubApprovalRevoker` against a stubbed HTTP
+server (string-typed body, fresh idempotency key per call, status polling
+including a `failed` terminal state, and the `simulate=true` synchronous
+response shape confirmed live against the real API), `approvals_to_auto_revoke`
+DANGEROUS-only filtering, both orchestrators' scan→revoke→report sequencing
+including revocation-failure and no-revoker paths on both the LangGraph and
+hand-rolled orchestrators, the revoke span/metrics/audit-log line (in-memory
+OTel exporter/reader + `caplog`), and the full contract fixture set on both
+the Rust and Python sides.
+
 ---
 
 ## 4. API contracts (summary)
@@ -1846,14 +1984,14 @@ Postgres), the reuse event (`RefreshSession`), and the HTTP throttle + audit
 | POST | `/api/auth/login` | Login → access token (body) + refresh cookie |
 | POST | `/api/auth/refresh` | Rotates the refresh cookie → new access token |
 | POST | `/api/auth/logout` | Revokes the refresh token, clears the cookie |
-| POST | `/api/searches` | Launches a search `{keyword, mode?}` → `{job_id}` (`mode`: `workflow` default, or `agent` — ADR-030) |
-| GET | `/api/searches` | List of the user's searches |
-| GET | `/api/searches/{id}` | Status + results sorted by date + agent journal `steps` (ADR-030) + `question`/`answer` (ADR-032) |
+| POST | `/api/searches` | Launches a scan `{wallet_address, mode?}` → `{job_id}` (`mode`: `workflow` default, or `agent` — ADR-030) |
+| GET | `/api/searches` | List of the user's scans |
+| GET | `/api/searches/{id}` | Status + findings sorted most-dangerous-first (ADR-058) + agent journal `steps` (ADR-030) + `question`/`answer` (ADR-032) |
 | POST | `/api/searches/{id}/answer` | Answers the agent's clarification `{answer}` → job resumes (ADR-032; 409 unless `awaiting_input`) |
 | GET | `/api/searches/{id}/events` | SSE stream of the same payload, one `update` event per change, closes on terminal status (ADR-026) |
-| POST | `/api/recurring` | Saves a recurring search `{keyword, mode?, interval_minutes, webhook_url?}` (ADR-033/036) |
-| GET | `/api/recurring` | Lists the user's recurring searches |
-| DELETE | `/api/recurring/{id}` | Deletes a recurring search (run history is kept) |
+| POST | `/api/recurring` | Saves a recurring scan `{wallet_address, mode?, interval_minutes, webhook_url?}` (ADR-033/036) |
+| GET | `/api/recurring` | Lists the user's recurring scans |
+| DELETE | `/api/recurring/{id}` | Deletes a recurring scan (run history is kept) |
 
 All `/api/*` routes can answer `429` (per-IP rate limit; `POST /api/searches`
 also enforces the per-user daily quota — ADR-017; `POST /api/auth/login` also
@@ -1863,20 +2001,20 @@ enforces a per-account throttle — ADR-057).
 
 | Method | Route | Description |
 |---|---|---|
-| POST | `/tasks` | `{job_id, keyword, mode, clarification?, seen_urls}` → Celery enqueue |
+| POST | `/tasks` | `{job_id, wallet_address, mode, clarification?, recurring, seen_approval_keys}` → Celery enqueue |
 
 ### Outbound (Rust → the user's systems)
 
 | Method | Route | Description |
 |---|---|---|
-| POST | *the saved `webhook_url`* | Digest of a recurring run with news `{recurring_search_id, job_id, keyword, new_count, new_results[]}` (ADR-036, fixture `contracts/digest-webhook.json`). Dedup on `job_id` (at-least-once). Signed `X-Signature-256: sha256=<HMAC-SHA256 of the body>` when `DIGEST_SIGNING_SECRET` is set (ADR-047) |
+| POST | *the saved `webhook_url`* | Digest of a recurring run with news `{recurring_search_id, job_id, wallet_address, new_count, new_results[]}`, each entry `{token_symbol, spender_address, tier, revocation_status}` (ADR-036/058, fixture `contracts/digest-webhook.json`). Dedup on `job_id` (at-least-once). Signed `X-Signature-256: sha256=<HMAC-SHA256 of the body>` when `DIGEST_SIGNING_SECRET` is set (ADR-047) |
 
 ### Internal (worker → Rust, shared token)
 
 | Method | Route | Description |
 |---|---|---|
 | POST | `/internal/jobs/{id}/started` | Worker picked the job up → status `running` (ADR-016) |
-| POST | `/internal/jobs/{id}/results` | Delivers results `[{title, url, snippet, published_at, date_confidence, event_type, summary, is_new, raw}]` |
+| POST | `/internal/jobs/{id}/results` | Delivers findings `[{chain_id, token_address, token_symbol, spender_address, spender_name, approved_amount, tier, malicious_behavior, explanation, is_new, revocation_status, revocation_tx_hash, raw}]` (ADR-058) |
 | POST | `/internal/jobs/{id}/steps` | Records one agent-loop decision `{seq, kind, detail, reason, new_hits}` (ADR-030, idempotent on seq) |
 | POST | `/internal/jobs/{id}/question` | The agent asks the user `{question}` → status `awaiting_input` (ADR-032) |
 | POST | `/internal/jobs/{id}/usage` | One task attempt's spend `{llm_calls, llm_input_tokens, llm_output_tokens, search_calls, cost_usd}` — accumulated (ADR-038) |

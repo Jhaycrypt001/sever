@@ -1,4 +1,4 @@
-//! Recurring searches CRUD (ADR-033). The scheduling itself lives in
+//! Recurring scans CRUD (ADR-033). The scheduling itself lives in
 //! `run_due_searches`; here is only what the user manages.
 
 use std::sync::Arc;
@@ -13,16 +13,16 @@ use crate::domain::{JobMode, RecurringSearch};
 pub enum RecurringError {
     #[error(transparent)]
     Invalid(#[from] JobError),
-    #[error("recurring search not found")]
+    #[error("recurring scan not found")]
     NotFound,
-    #[error("too many recurring searches ({0} max)")]
+    #[error("too many recurring scans ({0} max)")]
     TooMany(usize),
     #[error(transparent)]
     Infrastructure(#[from] PortError),
 }
 
 /// A user cannot hoard schedules: each run also counts against the daily
-/// search quota (ADR-017), this cap only keeps the scheduler scan bounded.
+/// scan quota (ADR-017), this cap only keeps the scheduler scan bounded.
 const MAX_PER_USER: usize = 20;
 
 pub struct RecurringSearches {
@@ -37,7 +37,7 @@ impl RecurringSearches {
     pub async fn create(
         &self,
         user_id: Uuid,
-        keyword: &str,
+        wallet_address: &str,
         mode: JobMode,
         interval_minutes: u32,
         webhook_url: Option<&str>,
@@ -45,7 +45,8 @@ impl RecurringSearches {
         if self.repo.list_for_user(user_id).await?.len() >= MAX_PER_USER {
             return Err(RecurringError::TooMany(MAX_PER_USER));
         }
-        let search = RecurringSearch::new(user_id, keyword, mode, interval_minutes, webhook_url)?;
+        let search =
+            RecurringSearch::new(user_id, wallet_address, mode, interval_minutes, webhook_url)?;
         self.repo.insert(&search).await?;
         Ok(search)
     }
@@ -68,6 +69,8 @@ mod tests {
     use super::*;
     use crate::adapters::persistence::in_memory::InMemoryRecurringSearchRepository;
 
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
+
     fn service() -> RecurringSearches {
         RecurringSearches::new(Arc::new(InMemoryRecurringSearchRepository::default()))
     }
@@ -78,7 +81,7 @@ mod tests {
         let user = Uuid::new_v4();
 
         let created = service
-            .create(user, "rust releases", JobMode::Agent, 60, None)
+            .create(user, ADDR, JobMode::Agent, 60, None)
             .await
             .unwrap();
         assert_eq!(service.list(user).await.unwrap(), vec![created.clone()]);
@@ -92,7 +95,7 @@ mod tests {
         let service = service();
         let owner = Uuid::new_v4();
         let created = service
-            .create(owner, "k", JobMode::Workflow, 60, None)
+            .create(owner, ADDR, JobMode::Workflow, 60, None)
             .await
             .unwrap();
 
@@ -110,17 +113,17 @@ mod tests {
         let user = Uuid::new_v4();
         assert!(matches!(
             service.create(user, " ", JobMode::Workflow, 60, None).await,
-            Err(RecurringError::Invalid(JobError::EmptyKeyword))
+            Err(RecurringError::Invalid(JobError::EmptyWalletAddress))
         ));
-        for i in 0..20 {
+        for _ in 0..20 {
             service
-                .create(user, &format!("k{i}"), JobMode::Workflow, 60, None)
+                .create(user, ADDR, JobMode::Workflow, 60, None)
                 .await
                 .unwrap();
         }
         assert!(matches!(
             service
-                .create(user, "one too many", JobMode::Workflow, 60, None)
+                .create(user, ADDR, JobMode::Workflow, 60, None)
                 .await,
             Err(RecurringError::TooMany(20))
         ));

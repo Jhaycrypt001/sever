@@ -1,107 +1,86 @@
-"""Live provider tests (ADR-012): opt-in — they call the PAID services.
+"""Live provider tests (ADR-012): opt-in — they call real network services.
 
 Run explicitly, with real keys in the environment (repo-root `.env`):
 
     RUN_LIVE_TESTS=1 uv run pytest tests/test_live_providers.py -v
 
 Never run in CI (cost, keys, network flakiness). Purpose: catch **provider
-drift** — renamed fields, changed reply shapes, a model that stops following
-the JSON instructions — which the defensive parsing everywhere else would
-otherwise degrade silently (dates quietly becoming `unknown`, event types
-quietly becoming `other`). Run them after bumping `AGENT_MODEL_ID` or when a
-deployment reports degraded extraction quality.
+drift** — renamed fields, a model that stops following the JSON instructions
+— which the defensive parsing everywhere else would otherwise degrade
+silently (a bad explanation quietly becoming empty). Run them after bumping
+`AGENT_MODEL_ID` or when a deployment reports degraded explanations.
+
+Deliberately excludes KeeperHub: a live execution test would let
+`RUN_LIVE_TESTS=1` accidentally submit a real onchain transaction. Verifying
+the executor against Sepolia is a manual, deliberate act (see SETUP.md), not
+something an opt-in pytest fixture should be able to trigger.
 """
 
 import os
-from datetime import UTC, datetime
 
 import pytest
 
-from aiagent.domain.models import EventType, RawSearchHit, SearchAction
+from aiagent.domain.models import RawApproval, RiskTier, ScanAction
 
 pytestmark = pytest.mark.skipif(
     os.environ.get("RUN_LIVE_TESTS") != "1",
-    reason="live provider tests are opt-in (RUN_LIVE_TESTS=1) — they cost API credits",
+    reason="live provider tests are opt-in (RUN_LIVE_TESTS=1) — they hit real APIs",
 )
 
-
-def release_hit() -> RawSearchHit:
-    """A hit whose snippet states the publication date and nature explicitly —
-    a healthy model must extract both."""
-    return RawSearchHit(
-        title="Rust 1.99 released with faster incremental builds",
-        url="https://blog.rust-lang.org/2026/03/12/Rust-1.99.0.html",
-        snippet=(
-            "The Rust team published this release announcement on 12 March 2026. "
-            "Rust 1.99 ships faster incremental builds and stabilizes several APIs."
-        ),
-    )
+# A real wallet with a live, GoPlus-flagged malicious approval at the time
+# this was written — a stable fixture for the drift check as long as it
+# stays unrevoked. If it starts failing, verify with a fresh curl before
+# assuming provider drift: https://api.gopluslabs.io/api/v2/token_approval_security/1
+_WALLET_WITH_KNOWN_FLAGGED_APPROVAL = "0x47ac0Fb4F2D84898e4D9E7b4DaB3C24507a6D503"
 
 
-def test_tavily_returns_hits_our_mapping_understands() -> None:
-    from aiagent.adapters.tavily import TavilySearchProvider
+def test_goplus_returns_approvals_our_mapping_understands() -> None:
+    from aiagent.adapters.goplus import GoPlusApprovalSource
 
-    hits = TavilySearchProvider(max_results=5).search("rust programming language news")
+    approvals = GoPlusApprovalSource().fetch_approvals(_WALLET_WITH_KNOWN_FLAGGED_APPROVAL, "1")
 
-    assert hits, "live Tavily search returned no results"
-    for hit in hits:
-        assert hit.url.startswith("http")
-        assert hit.title
-    # Field-name drift check: the raw items still carry the keys we map
-    # (a rename would silently empty titles/snippets otherwise).
-    assert all({"title", "url", "content"} <= set(h.raw) for h in hits)
+    assert approvals, "live GoPlus call returned no approvals for a wallet known to have some"
+    for approval in approvals:
+        assert approval.token_address.startswith("0x")
+        assert approval.spender_address.startswith("0x")
+    # Field-shape drift check: at least one entry should carry the signals
+    # `classify_risk` reads (a GoPlus schema change would silently break this).
+    assert all({"malicious_address", "is_open_source"} <= set(a.raw) for a in approvals)
 
 
-def test_claude_enricher_extracts_the_stated_date_and_type() -> None:
+def test_claude_threat_intel_explains_a_dangerous_approval() -> None:
     from aiagent.adapters.chat_model import make_chat_model
-    from aiagent.adapters.llm import LlmHitEnricher
+    from aiagent.adapters.llm import LlmThreatIntel
     from aiagent.config import Settings
 
-    enrichment = LlmHitEnricher(make_chat_model(Settings.from_env(), max_tokens=256)).enrich(
-        release_hit()
+    approval = RawApproval(
+        chain_id="1",
+        token_address="0xtoken",
+        token_symbol="USDC",
+        spender_address="0xbad000000000000000000000000000000bad00",
+        approved_amount="Unlimited",
+        raw={"malicious_address": True, "malicious_behavior": ["phishing_activities"]},
     )
+    assessment = LlmThreatIntel(make_chat_model(Settings.from_env(), max_tokens=256)).assess_many(
+        [approval]
+    )[0]
 
-    # The snippet states the date in prose: the model must return it as ISO
-    # (a drift here means dates silently fall back to `medium`/`unknown`).
-    assert enrichment.published_at is not None, "model failed to extract an explicit date"
-    assert enrichment.published_at.date() == datetime(2026, 3, 12, tzinfo=UTC).date()
-    # A release announcement: either label is defensible, anything else is drift.
-    assert enrichment.event_type in (EventType.RELEASE, EventType.ANNOUNCEMENT)
-    assert enrichment.summary, "model returned no summary"
+    # The tier is deterministic (ADR-058) regardless of the model; only the
+    # explanation is the model's job, and it must not come back empty.
+    assert assessment.tier == RiskTier.DANGEROUS
+    assert assessment.explanation, "model returned no explanation"
 
 
-def test_claude_policy_starts_an_unambiguous_goal_with_a_search() -> None:
+def test_claude_policy_starts_a_fresh_scan_with_a_chain() -> None:
     from aiagent.adapters.chat_model import make_chat_model
     from aiagent.adapters.llm import LlmAgentPolicy
     from aiagent.config import Settings
 
     action = LlmAgentPolicy(make_chat_model(Settings.from_env(), max_tokens=256)).decide(
-        "rust 1.99 release notes and reactions", [], []
+        "scan wallet 0xabc for risky token approvals (chains: 1,8453)", [], []
     )
 
-    # Fresh loop, clear goal, nothing collected: a sane policy searches.
-    assert isinstance(action, SearchAction), f"expected a search, got {action!r}"
-    assert action.query.strip()
+    # Fresh loop, clear goal, nothing scanned: a sane policy scans.
+    assert isinstance(action, ScanAction), f"expected a scan, got {action!r}"
+    assert action.chain_id.strip()
     assert action.reason.strip()
-
-
-def test_claude_critic_keeps_on_topic_results() -> None:
-    from aiagent.adapters.chat_model import make_chat_model
-    from aiagent.adapters.llm import LlmResultCritic
-    from aiagent.config import Settings
-
-    hits = [
-        release_hit(),
-        RawSearchHit(
-            title="Rust 1.99 review: what the new release means in practice",
-            url="https://example-tech-blog.com/rust-1-99-review",
-            snippet="A hands-on look at the Rust 1.99 release and its build-time gains.",
-        ),
-    ]
-    critique = LlmResultCritic(make_chat_model(Settings.from_env(), max_tokens=512)).critique(
-        "rust 1.99 release", hits
-    )
-
-    assert critique.assessment.strip(), "model returned no assessment"
-    # The prompt asks for conservative drops: both hits are clearly on topic.
-    assert len(critique.irrelevant_urls) == 0, f"dropped on-topic: {critique.irrelevant_urls}"

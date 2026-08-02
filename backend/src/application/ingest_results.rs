@@ -5,7 +5,7 @@ use uuid::Uuid;
 use crate::domain::ports::{
     Digest, DigestEntry, DigestSender, JobRepository, PortError, RecurringSearchRepository,
 };
-use crate::domain::{AgentStep, JobUsage, ResearchJob, SearchResult};
+use crate::domain::{AgentStep, ApprovalFinding, JobUsage, ScanJob};
 
 #[derive(Debug, thiserror::Error)]
 pub enum IngestError {
@@ -35,14 +35,14 @@ impl IngestResults {
         }
     }
 
-    /// Digest hook (ADR-036): a recurring run that delivered new results
+    /// Digest hook (ADR-036): a recurring run that delivered new findings
     /// notifies the saved webhook. Strictly best-effort — a dead webhook (or
-    /// a deleted recurring search) never fails the ingestion.
-    async fn maybe_send_digest(&self, job: &ResearchJob, results: &[SearchResult]) {
+    /// a deleted recurring scan) never fails the ingestion.
+    async fn maybe_send_digest(&self, job: &ScanJob, results: &[ApprovalFinding]) {
         let Some(rs_id) = job.recurring_search_id else {
             return;
         };
-        let new_results: Vec<&SearchResult> = results.iter().filter(|r| r.is_new).collect();
+        let new_results: Vec<&ApprovalFinding> = results.iter().filter(|r| r.is_new).collect();
         if new_results.is_empty() {
             return; // nothing new since the last run: no notification
         }
@@ -60,14 +60,15 @@ impl IngestResults {
         let digest = Digest {
             recurring_search_id: rs_id,
             job_id: job.id,
-            keyword: job.keyword.clone(),
+            wallet_address: job.wallet_address.clone(),
             new_count: new_results.len(),
             new_results: new_results
                 .iter()
                 .map(|r| DigestEntry {
-                    title: r.title.clone(),
-                    url: r.url.clone(),
-                    published_at: r.published_at,
+                    token_symbol: r.token_symbol.clone(),
+                    spender_address: r.spender_address.clone(),
+                    tier: r.tier,
+                    revocation_status: r.revocation_status,
                 })
                 .collect(),
         };
@@ -91,7 +92,7 @@ impl IngestResults {
     pub async fn complete(
         &self,
         job_id: Uuid,
-        results: &[SearchResult],
+        results: &[ApprovalFinding],
     ) -> Result<(), IngestError> {
         let mut job = self
             .jobs
@@ -101,6 +102,26 @@ impl IngestResults {
         self.jobs.store_results(job_id, results).await?;
         job.complete();
         self.jobs.update(&job).await?;
+        // Audit trail (ADR-058/018): the moment a scan's findings land in the
+        // system of record, alongside the durable rows themselves — greppable
+        // without a DB query, the Rust-side half of the Python adapter's
+        // per-attempt "revocation attempt" log.
+        let dangerous = results
+            .iter()
+            .filter(|r| r.tier == crate::domain::RiskTier::Dangerous)
+            .count();
+        let revoked = results
+            .iter()
+            .filter(|r| r.revocation_status == crate::domain::RevocationStatus::Revoked)
+            .count();
+        tracing::info!(
+            job_id = %job_id,
+            wallet_address = %job.wallet_address,
+            findings = results.len(),
+            dangerous,
+            revoked,
+            "scan completed"
+        );
         self.maybe_send_digest(&job, results).await;
         Ok(())
     }
@@ -159,8 +180,10 @@ mod tests {
     use crate::adapters::persistence::in_memory::{
         InMemoryJobRepository, InMemoryRecurringSearchRepository,
     };
-    use crate::domain::{DateConfidence, JobMode, JobStatus, RecurringSearch, ResearchJob};
+    use crate::domain::{JobMode, JobStatus, RecurringSearch, RevocationStatus, RiskTier, ScanJob};
     use std::sync::Mutex;
+
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
 
     /// Records digest deliveries for assertions.
     #[derive(Default)]
@@ -184,23 +207,27 @@ mod tests {
         IngestResults::new(jobs, recurring, digests)
     }
 
-    fn a_result(title: &str) -> SearchResult {
-        SearchResult {
-            title: title.into(),
-            url: "https://example.com".into(),
-            snippet: "...".into(),
-            published_at: None,
-            date_confidence: DateConfidence::Unknown,
-            event_type: crate::domain::EventType::default(),
-            summary: None,
+    fn a_result(spender: &str) -> ApprovalFinding {
+        ApprovalFinding {
+            chain_id: "1".into(),
+            token_address: "0xtoken".into(),
+            token_symbol: "TKN".into(),
+            spender_address: spender.into(),
+            spender_name: None,
+            approved_amount: "Unlimited".into(),
+            tier: RiskTier::Safe,
+            malicious_behavior: vec![],
+            explanation: None,
             is_new: true,
+            revocation_status: RevocationStatus::NotAttempted,
+            revocation_tx_hash: None,
             raw: serde_json::Value::Null,
         }
     }
 
-    async fn repo_with_job() -> (Arc<InMemoryJobRepository>, ResearchJob) {
+    async fn repo_with_job() -> (Arc<InMemoryJobRepository>, ScanJob) {
         let jobs = Arc::new(InMemoryJobRepository::default());
-        let job = ResearchJob::new(Uuid::new_v4(), "keyword").unwrap();
+        let job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         jobs.insert(&job).await.unwrap();
         (jobs, job)
     }
@@ -229,7 +256,10 @@ mod tests {
             Arc::new(RecordingDigestSender::default()),
         );
 
-        ingest.complete(job.id, &[a_result("r")]).await.unwrap();
+        ingest
+            .complete(job.id, &[a_result("0xspender")])
+            .await
+            .unwrap();
         ingest.start(job.id).await.unwrap(); // Celery retry after completion
 
         let stored = jobs.find(job.id).await.unwrap().unwrap();
@@ -246,7 +276,7 @@ mod tests {
         );
 
         ingest
-            .complete(job.id, &[a_result("r1"), a_result("r2")])
+            .complete(job.id, &[a_result("0xa"), a_result("0xb")])
             .await
             .unwrap();
 
@@ -265,13 +295,13 @@ mod tests {
         );
 
         ingest
-            .fail(job.id, "provider quota exceeded".into())
+            .fail(job.id, "GoPlus quota exceeded".into())
             .await
             .unwrap();
 
         let stored = jobs.find(job.id).await.unwrap().unwrap();
         assert_eq!(stored.status, JobStatus::Failed);
-        assert_eq!(stored.error.as_deref(), Some("provider quota exceeded"));
+        assert_eq!(stored.error.as_deref(), Some("GoPlus quota exceeded"));
     }
 
     #[tokio::test]
@@ -291,7 +321,7 @@ mod tests {
         AgentStep {
             seq,
             kind: kind.into(),
-            detail: "rust".into(),
+            detail: "1".into(),
             reason: "because".into(),
             new_hits: 2,
         }
@@ -307,11 +337,11 @@ mod tests {
         );
 
         ingest
-            .record_step(job.id, &a_step(1, "search"))
+            .record_step(job.id, &a_step(1, "scan"))
             .await
             .unwrap();
         ingest
-            .record_step(job.id, &a_step(1, "search"))
+            .record_step(job.id, &a_step(1, "scan"))
             .await
             .unwrap(); // retry
         ingest
@@ -326,7 +356,7 @@ mod tests {
                 .iter()
                 .map(|s| (s.seq, s.kind.as_str()))
                 .collect::<Vec<_>>(),
-            vec![(1, "search"), (2, "finish")]
+            vec![(1, "scan"), (2, "finish")]
         );
     }
 
@@ -341,13 +371,16 @@ mod tests {
         ingest.start(job.id).await.unwrap();
 
         ingest
-            .request_input(job.id, "The animal or the car?")
+            .request_input(job.id, "Which chains should I scan?")
             .await
             .unwrap();
 
         let stored = jobs.find(job.id).await.unwrap().unwrap();
         assert_eq!(stored.status, JobStatus::AwaitingInput);
-        assert_eq!(stored.question.as_deref(), Some("The animal or the car?"));
+        assert_eq!(
+            stored.question.as_deref(),
+            Some("Which chains should I scan?")
+        );
     }
 
     #[tokio::test]
@@ -358,7 +391,7 @@ mod tests {
             Arc::new(RecordingDigestSender::default()),
         );
         let err = ingest
-            .record_step(Uuid::new_v4(), &a_step(1, "search"))
+            .record_step(Uuid::new_v4(), &a_step(1, "scan"))
             .await
             .unwrap_err();
         assert!(matches!(err, IngestError::JobNotFound));
@@ -373,22 +406,22 @@ mod tests {
 
         let rs = RecurringSearch::new(
             Uuid::new_v4(),
-            "rust releases",
+            ADDR,
             JobMode::Agent,
             60,
             Some("https://hooks.example.com/digest"),
         )
         .unwrap();
         recurring.insert(&rs).await.unwrap();
-        let job = ResearchJob::new(rs.user_id, "rust releases")
+        let job = ScanJob::new(rs.user_id, ADDR)
             .unwrap()
             .with_recurring(rs.id);
         jobs.insert(&job).await.unwrap();
 
-        let mut seen = a_result("already-seen");
+        let mut seen = a_result("0xalready-seen");
         seen.is_new = false;
         ingest
-            .complete(job.id, &[a_result("fresh"), seen])
+            .complete(job.id, &[a_result("0xfresh"), seen])
             .await
             .unwrap();
 
@@ -396,10 +429,10 @@ mod tests {
         assert_eq!(sent.len(), 1);
         let (url, digest) = &sent[0];
         assert_eq!(url, "https://hooks.example.com/digest");
-        assert_eq!(digest.keyword, "rust releases");
+        assert_eq!(digest.wallet_address, ADDR);
         assert_eq!(digest.new_count, 1);
-        // Only the NEW results ride in the digest.
-        assert_eq!(digest.new_results[0].title, "fresh");
+        // Only the NEW findings ride in the digest.
+        assert_eq!(digest.new_results[0].spender_address, "0xfresh");
     }
 
     #[tokio::test]
@@ -409,38 +442,38 @@ mod tests {
         let digests = Arc::new(RecordingDigestSender::default());
         let ingest = ingest_with(jobs.clone(), recurring.clone(), digests.clone());
 
-        // One-shot job: never a digest, even with new results.
-        let one_shot = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        // One-shot job: never a digest, even with new findings.
+        let one_shot = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         jobs.insert(&one_shot).await.unwrap();
         ingest
-            .complete(one_shot.id, &[a_result("r")])
+            .complete(one_shot.id, &[a_result("0xr")])
             .await
             .unwrap();
 
         // Recurring without a webhook: no digest.
-        let silent = RecurringSearch::new(Uuid::new_v4(), "k", JobMode::Agent, 60, None).unwrap();
+        let silent = RecurringSearch::new(Uuid::new_v4(), ADDR, JobMode::Agent, 60, None).unwrap();
         recurring.insert(&silent).await.unwrap();
-        let job = ResearchJob::new(silent.user_id, "k")
+        let job = ScanJob::new(silent.user_id, ADDR)
             .unwrap()
             .with_recurring(silent.id);
         jobs.insert(&job).await.unwrap();
-        ingest.complete(job.id, &[a_result("r")]).await.unwrap();
+        ingest.complete(job.id, &[a_result("0xr")]).await.unwrap();
 
         // Recurring with a webhook but nothing new: no digest.
         let hooked = RecurringSearch::new(
             Uuid::new_v4(),
-            "k",
+            ADDR,
             JobMode::Agent,
             60,
             Some("https://hooks.example.com/x"),
         )
         .unwrap();
         recurring.insert(&hooked).await.unwrap();
-        let job2 = ResearchJob::new(hooked.user_id, "k")
+        let job2 = ScanJob::new(hooked.user_id, ADDR)
             .unwrap()
             .with_recurring(hooked.id);
         jobs.insert(&job2).await.unwrap();
-        let mut old = a_result("old");
+        let mut old = a_result("0xold");
         old.is_new = false;
         ingest.complete(job2.id, &[old]).await.unwrap();
 

@@ -1,27 +1,26 @@
-"""Fake providers and provider selection (ADR-021)."""
+"""Fake providers and provider selection (ADR-021/058)."""
 
 import pytest
-from pydantic import ValidationError
 
 from aiagent.adapters.fake import (
     FakeAgentPolicy,
-    FakeHitEnricher,
-    FakePageDateFetcher,
-    FakeResultCritic,
-    FakeSearchProvider,
+    FakeApprovalRevoker,
+    FakeApprovalSource,
+    FakeThreatIntel,
 )
-from aiagent.application import run_research
+from aiagent.application import run_scan
 from aiagent.config import Settings
 from aiagent.domain.models import (
     AgentStep,
     AgentStepKind,
     AskAction,
-    DateConfidence,
-    EventType,
     FinishAction,
-    SearchAction,
+    RevocationStatus,
+    RiskTier,
+    ScanAction,
 )
-from aiagent.tasks import build_critic, build_policy, build_providers
+from aiagent.domain.ports import ApprovalRevoker
+from aiagent.tasks import build_policy, build_providers, build_revoker
 
 
 def settings_with(providers: str) -> Settings:
@@ -31,7 +30,11 @@ def settings_with(providers: str) -> Settings:
         internal_api_token="t",
         agent_model_id="claude-opus-4-8",
         providers=providers,
-        search_providers=["tavily"],
+        scan_chain_ids=["1", "8453"],
+        goplus_api_key="",
+        keeperhub_api_url="https://app.keeperhub.com",
+        keeperhub_api_key="",
+        keeperhub_simulate_only=False,
         agent_max_steps=5,
         agent_max_cost_usd=2.0,
         agent_orchestrator="langgraph",
@@ -53,87 +56,63 @@ class NullSink:
 
 
 def test_build_providers_selects_fakes() -> None:
-    search, enricher, page_dates = build_providers(settings_with("fake"))
-    assert isinstance(search, FakeSearchProvider)
-    assert isinstance(enricher, FakeHitEnricher)
-    assert isinstance(page_dates, FakePageDateFetcher)
-
-
-def test_build_search_provider_single_and_aggregated() -> None:
-    from aiagent.adapters.aggregating_search import AggregatingSearchProvider
-    from aiagent.adapters.duckduckgo import DuckDuckGoSearchProvider
-    from aiagent.tasks import build_search_provider
-
-    # One engine -> the bare adapter; several -> the aggregator (ADR-051).
-    assert isinstance(build_search_provider(["duckduckgo"]), DuckDuckGoSearchProvider)
-    assert isinstance(
-        build_search_provider(["duckduckgo", "duckduckgo"]), AggregatingSearchProvider
-    )
-
-
-def test_build_search_provider_rejects_an_unknown_engine() -> None:
-    from aiagent.tasks import build_search_provider
-
-    with pytest.raises(ValueError, match="unknown search provider"):
-        build_search_provider(["bing"])
+    source, threat_intel = build_providers(settings_with("fake"))
+    assert isinstance(source, FakeApprovalSource)
+    assert isinstance(threat_intel, FakeThreatIntel)
 
 
 def test_build_providers_live_requires_credentials(monkeypatch) -> None:
     """The live path still fails fast without keys (covered by ADR-020 at
     worker startup; this guards the factory itself)."""
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValueError, match="ANTHROPIC_API_KEY"):
         build_providers(settings_with("live"))
 
 
-def test_fake_run_exercises_the_full_date_cascade() -> None:
-    """One deterministic run covers every cascade stage (ADR-011/035) + sorting."""
-    results = run_research(
-        "job-1",
-        "anything",
-        FakeSearchProvider(),
-        FakeHitEnricher(),
-        NullSink(),
-        page_dates=FakePageDateFetcher(),
+def test_build_revoker_selects_the_fake() -> None:
+    assert isinstance(build_revoker(settings_with("fake")), FakeApprovalRevoker)
+
+
+def test_build_revoker_selects_keeperhub_live() -> None:
+    from aiagent.adapters.keeperhub import KeeperHubApprovalRevoker
+
+    revoker: ApprovalRevoker = build_revoker(settings_with("live"))
+    assert isinstance(revoker, KeeperHubApprovalRevoker)
+
+
+def test_fake_run_exercises_the_full_risk_cascade() -> None:
+    """One deterministic run covers every risk tier (ADR-058) + sorting."""
+    results = run_scan(
+        "job-1", "0xwallet", ["1"], FakeApprovalSource(), FakeThreatIntel(), NullSink()
     )
 
-    titles = [r.title for r in results]
-    assert titles == [
-        "fake-dated-recent",  # 2026-05 — provider date, newest first
-        "fake-page-datable",  # 2025-12 — date declared by the page (ADR-035)
-        "fake-llm-datable",  # 2025-08 — date found by the fake LLM
-        "fake-dated-old",  # 2023
-        "fake-undatable",  # no date — always last
-    ]
-    by_title = {r.title: r for r in results}
-    assert by_title["fake-dated-recent"].date_confidence == DateConfidence.HIGH
-    assert by_title["fake-page-datable"].date_confidence == DateConfidence.HIGH
-    assert by_title["fake-llm-datable"].date_confidence == DateConfidence.MEDIUM
-    assert by_title["fake-undatable"].date_confidence == DateConfidence.UNKNOWN
-    # Enrichment (ADR-027): deterministic event type and summary on every result.
-    assert all(r.event_type == EventType.ANNOUNCEMENT for r in results)
-    assert by_title["fake-undatable"].summary == "Fake summary for fake-undatable"
+    symbols = [r.token_symbol for r in results]
+    assert symbols == ["fake-dangerous", "fake-watch", "fake-safe"]  # most dangerous first
+    by_symbol = {r.token_symbol: r for r in results}
+    assert by_symbol["fake-dangerous"].tier == RiskTier.DANGEROUS
+    assert by_symbol["fake-watch"].tier == RiskTier.WATCH
+    assert by_symbol["fake-safe"].tier == RiskTier.SAFE
+    assert all(r.explanation for r in results)
 
 
-def test_fake_search_is_deterministic() -> None:
-    provider = FakeSearchProvider()
-    assert provider.search("kw") == provider.search("kw")
+def test_fake_source_is_deterministic() -> None:
+    source = FakeApprovalSource()
+    assert source.fetch_approvals("0xwallet", "1") == source.fetch_approvals("0xwallet", "1")
 
 
-def test_fake_policy_searches_refines_then_finishes() -> None:
+def test_fake_policy_scans_ethereum_then_base_then_finishes() -> None:
     policy = FakeAgentPolicy()
-    first = policy.decide("rust", [], [])
-    assert first == SearchAction(query="rust", reason="Start with the user's goal as the query")
+    first = policy.decide("scan wallet 0xabc", [], [])
+    assert first == ScanAction(chain_id="1", reason="Start with Ethereum mainnet")
 
-    one_step = [AgentStep(seq=1, kind=AgentStepKind.SEARCH, detail="rust", reason="r", new_hits=4)]
-    second = policy.decide("rust", one_step, [])
-    assert isinstance(second, SearchAction) and second.query == "rust latest"
+    one_step = [AgentStep(seq=1, kind=AgentStepKind.SCAN, detail="1", reason="r", new_hits=3)]
+    second = policy.decide("scan wallet 0xabc", one_step, [])
+    assert isinstance(second, ScanAction) and second.chain_id == "8453"
 
     two_steps = one_step + [
-        AgentStep(seq=2, kind=AgentStepKind.SEARCH, detail="rust latest", reason="r", new_hits=0)
+        AgentStep(seq=2, kind=AgentStepKind.SCAN, detail="8453", reason="r", new_hits=0)
     ]
-    assert isinstance(policy.decide("rust", two_steps, []), FinishAction)
+    assert isinstance(policy.decide("scan wallet 0xabc", two_steps, []), FinishAction)
 
 
 def test_build_policy_selects_the_fake(monkeypatch) -> None:
@@ -141,22 +120,25 @@ def test_build_policy_selects_the_fake(monkeypatch) -> None:
     assert isinstance(build_policy(Settings.from_env()), FakeAgentPolicy)
 
 
-def test_fake_critic_returns_a_stable_non_destructive_review() -> None:
-    critique = FakeResultCritic().critique("rust", FakeSearchProvider().search("rust"))
-    assert "All 5 results" in critique.assessment
-    assert critique.irrelevant_urls == () and critique.gap_query is None
+def test_fake_revoker_always_succeeds_with_a_synthetic_tx_hash() -> None:
+    findings = run_scan(
+        "job-1", "0xwallet", ["1"], FakeApprovalSource(), FakeThreatIntel(), NullSink()
+    )
+    dangerous = next(f for f in findings if f.tier == RiskTier.DANGEROUS)
 
+    revoked = FakeApprovalRevoker().revoke(dangerous)
 
-def test_build_critic_selects_the_fake(monkeypatch) -> None:
-    monkeypatch.setenv("AGENT_PROVIDERS", "fake")
-    assert isinstance(build_critic(Settings.from_env()), FakeResultCritic)
+    assert revoked.revocation_status == RevocationStatus.REVOKED
+    assert revoked.revocation_tx_hash is not None
 
 
 def test_fake_policy_asks_once_on_an_ambiguous_goal() -> None:
     policy = FakeAgentPolicy()
-    first = policy.decide("ambiguous topic", [], [])
+    first = policy.decide("scan wallet 0xabc, ambiguous scope", [], [])
     assert isinstance(first, AskAction)
 
     # The task folds the answer into the goal on resume: no second question.
-    resumed = policy.decide('ambiguous topic (user clarification: "cars")', [], [])
-    assert isinstance(resumed, SearchAction)
+    resumed = policy.decide(
+        'scan wallet 0xabc, ambiguous scope (user clarification: "ethereum only")', [], []
+    )
+    assert isinstance(resumed, ScanAction)

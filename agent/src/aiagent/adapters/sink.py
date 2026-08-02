@@ -4,20 +4,24 @@ from typing import Any
 
 import httpx
 
-from aiagent.domain.models import AgentStep, ResearchResult
+from aiagent.domain.models import AgentStep, ApprovalFinding
 from aiagent.domain.usage import Pricing, Usage
 
 
-def serialize_result(result: ResearchResult) -> dict[str, Any]:
+def serialize_result(result: ApprovalFinding) -> dict[str, Any]:
     return {
-        "title": result.title,
-        "url": result.url,
-        "snippet": result.snippet,
-        "published_at": result.published_at.isoformat() if result.published_at else None,
-        "date_confidence": result.date_confidence.value,
-        "event_type": result.event_type.value,
-        "summary": result.summary,
+        "chain_id": result.chain_id,
+        "token_address": result.token_address,
+        "token_symbol": result.token_symbol,
+        "spender_address": result.spender_address,
+        "spender_name": result.spender_name,
+        "approved_amount": result.approved_amount,
+        "tier": result.tier.value,
+        "malicious_behavior": list(result.malicious_behavior),
+        "explanation": result.explanation,
         "is_new": result.is_new,
+        "revocation_status": result.revocation_status.value,
+        "revocation_tx_hash": result.revocation_tx_hash,
         "raw": result.raw,
     }
 
@@ -64,7 +68,7 @@ class HttpResultSink:
         )
         response.raise_for_status()
 
-    def deliver(self, job_id: str, results: list[ResearchResult]) -> None:
+    def deliver(self, job_id: str, results: list[ApprovalFinding]) -> None:
         response = self._client.post(
             f"{self._base_url}/internal/jobs/{job_id}/results",
             json={"results": [serialize_result(r) for r in results]},

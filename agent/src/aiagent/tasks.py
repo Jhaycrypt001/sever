@@ -6,17 +6,11 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from aiagent import metrics
-from aiagent.application import run_agent_research, run_research
+from aiagent.application import run_agent_scan, run_scan
 from aiagent.celery_app import app
 from aiagent.config import Settings
-from aiagent.domain.models import ResearchResult
-from aiagent.domain.ports import (
-    AgentPolicy,
-    HitEnricher,
-    PageDateFetcher,
-    ResultCritic,
-    SearchProvider,
-)
+from aiagent.domain.models import ApprovalFinding
+from aiagent.domain.ports import AgentPolicy, ApprovalRevoker, ApprovalSource, ThreatIntel
 from aiagent.domain.usage import Pricing, SpendGuard, UsageMeter
 
 if TYPE_CHECKING:
@@ -52,65 +46,33 @@ def _agent_checkpointer(settings: Settings) -> "Iterator[BaseCheckpointSaver[Any
 
 def build_providers(
     settings: Settings, meter: UsageMeter | None = None
-) -> tuple[SearchProvider, HitEnricher, PageDateFetcher]:
-    """Selects the provider adapters (ADR-021): live (Tavily + Claude + page
-    metadata) by default, deterministic fakes with `AGENT_PROVIDERS=fake`.
-    The meter records spend (ADR-038)."""
+) -> tuple[ApprovalSource, ThreatIntel]:
+    """Selects the provider adapters (ADR-021): live (GoPlus + Claude) by
+    default, deterministic fakes with `AGENT_PROVIDERS=fake`. The meter
+    records spend (ADR-038)."""
     if settings.providers == "fake":
-        from aiagent.adapters.fake import (
-            FakeHitEnricher,
-            FakePageDateFetcher,
-            FakeSearchProvider,
-        )
+        from aiagent.adapters.fake import FakeApprovalSource, FakeThreatIntel
 
-        return FakeSearchProvider(meter), FakeHitEnricher(meter), FakePageDateFetcher()
+        return FakeApprovalSource(meter), FakeThreatIntel(meter)
 
     from aiagent.adapters.chat_model import make_chat_model, make_fallback_chat_models
-    from aiagent.adapters.llm import LlmHitEnricher
-    from aiagent.adapters.page import HttpPageDateFetcher
+    from aiagent.adapters.goplus import GoPlusApprovalSource
+    from aiagent.adapters.llm import LlmThreatIntel
 
     return (
-        build_search_provider(settings.search_providers, meter),
-        LlmHitEnricher(
+        GoPlusApprovalSource(meter=meter, api_key=settings.goplus_api_key),
+        LlmThreatIntel(
             make_chat_model(settings, max_tokens=256),
             meter=meter,
             model=settings.agent_model_id,
             system=settings.llm_backend,
             fallbacks=make_fallback_chat_models(settings, max_tokens=256),
         ),
-        HttpPageDateFetcher(),
     )
 
 
-def _search_provider(name: str, meter: UsageMeter | None) -> SearchProvider:
-    """One live search adapter by name (ADR-051)."""
-    if name == "tavily":
-        from aiagent.adapters.tavily import TavilySearchProvider
-
-        return TavilySearchProvider(meter=meter)
-    if name == "duckduckgo":
-        from aiagent.adapters.duckduckgo import DuckDuckGoSearchProvider
-
-        return DuckDuckGoSearchProvider(meter=meter)
-    raise ValueError(f"unknown search provider {name!r} (expected: tavily, duckduckgo)")
-
-
-def build_search_provider(names: list[str], meter: UsageMeter | None = None) -> SearchProvider:
-    """Builds the live `SearchProvider` from the configured engine names (ADR-051):
-    a single adapter for one name, or an `AggregatingSearchProvider` fusing
-    several (concurrent, deduplicated, rank-fused, partial-failure tolerant)."""
-    providers = [_search_provider(name, meter) for name in names]
-    if not providers:
-        raise ValueError("no search provider configured (AGENT_SEARCH_PROVIDERS is empty)")
-    if len(providers) == 1:
-        return providers[0]
-    from aiagent.adapters.aggregating_search import AggregatingSearchProvider
-
-    return AggregatingSearchProvider(providers)
-
-
 def build_policy(settings: Settings, meter: UsageMeter | None = None) -> AgentPolicy:
-    """Selects the decision-maker of the agentic loop (ADR-030)."""
+    """Selects the decision-maker of the agentic loop (ADR-030/058)."""
     if settings.providers == "fake":
         from aiagent.adapters.fake import FakeAgentPolicy
 
@@ -128,80 +90,79 @@ def build_policy(settings: Settings, meter: UsageMeter | None = None) -> AgentPo
     )
 
 
-def build_critic(settings: Settings, meter: UsageMeter | None = None) -> ResultCritic:
-    """Selects the self-critique reviewer (ADR-031)."""
+def build_revoker(settings: Settings, meter: UsageMeter | None = None) -> ApprovalRevoker:
+    """Selects the onchain executor (ADR-058): KeeperHub live, or a fake that
+    always "succeeds" with a synthetic tx hash for the keyless demo/e2e."""
     if settings.providers == "fake":
-        from aiagent.adapters.fake import FakeResultCritic
+        from aiagent.adapters.fake import FakeApprovalRevoker
 
-        return FakeResultCritic(meter)
+        return FakeApprovalRevoker(meter)
 
-    from aiagent.adapters.chat_model import make_chat_model, make_fallback_chat_models
-    from aiagent.adapters.llm import LlmResultCritic
+    from aiagent.adapters.keeperhub import KeeperHubApprovalRevoker
 
-    return LlmResultCritic(
-        make_chat_model(settings, max_tokens=512),
+    return KeeperHubApprovalRevoker(
+        settings.keeperhub_api_url,
+        settings.keeperhub_api_key,
         meter=meter,
-        model=settings.agent_model_id,
-        system=settings.llm_backend,
-        fallbacks=make_fallback_chat_models(settings, max_tokens=512),
+        simulate_only=settings.keeperhub_simulate_only,
     )
 
 
 def _run_agent(
     settings: Settings,
     job_id: str,
-    keyword: str,
+    wallet_address: str,
     clarification: str | None,
-    search: SearchProvider,
-    enricher: HitEnricher,
+    source: ApprovalSource,
+    threat_intel: ThreatIntel,
     policy: AgentPolicy,
-    critic: ResultCritic | None,
+    revoker: ApprovalRevoker,
     # HttpResultSink structurally satisfies ResultSink + StepReporter +
     # ClarificationRequester; typed Any to pass it in all three roles.
     sink: Any,
     memory: set[str] | None,
-    page_dates: PageDateFetcher,
     budget: SpendGuard,
-) -> list[ResearchResult] | None:
+) -> list[ApprovalFinding] | None:
     """Dispatches the agent mode to the configured orchestrator (ADR-046).
     Both drive the same ports; `sink` also acts as StepReporter and
-    ClarificationRequester. Returns the results, or None when paused."""
+    ClarificationRequester. Returns the findings, or None when paused."""
     if settings.agent_orchestrator == "loop":
-        goal = keyword
+        goal = f"scan wallet {wallet_address} for risky token approvals"
         if clarification:
-            goal = f'{keyword} (user clarification: "{clarification}")'
-        return run_agent_research(
+            goal = f'{goal} (user clarification: "{clarification}")'
+        return run_agent_scan(
             job_id,
             goal,
-            search,
-            enricher,
+            wallet_address,
+            source,
+            threat_intel,
             policy,
             sink,
             sink,
-            critic=critic,
+            revoker=revoker,
             clarifier=sink,
             clarification=clarification,
-            seen_urls=memory,
-            page_dates=page_dates,
+            seen_keys=memory,
             max_steps=settings.agent_max_steps,
             budget=budget,
         )
     from aiagent.adapters.orchestration.langgraph_agent import run_agent_graph
 
+    goal = f"scan wallet {wallet_address} for risky token approvals"
     with _agent_checkpointer(settings) as checkpointer:
         return run_agent_graph(
             job_id,
-            keyword,
-            search,
-            enricher,
+            goal,
+            wallet_address,
+            source,
+            threat_intel,
             policy,
             sink,
             sink,
             checkpointer,
-            critic=critic,
+            revoker=revoker,
             clarifier=sink,
-            seen_urls=memory,
-            page_dates=page_dates,
+            seen_keys=memory,
             max_steps=settings.agent_max_steps,
             budget=budget,
             # The re-dispatch after an answer carries it as `clarification`;
@@ -211,7 +172,7 @@ def _run_agent(
 
 
 @app.task(
-    name="aiagent.run_research",
+    name="aiagent.run_scan",
     bind=False,
     # Transient failures (network, provider hiccup) are retried with exponential
     # backoff; idempotence makes re-runs safe (ADR-016). After the last retry the
@@ -222,22 +183,22 @@ def _run_agent(
     retry_backoff_max=600,
     retry_jitter=True,
 )
-def run_research_task(
+def run_scan_task(
     job_id: str,
-    keyword: str,
+    wallet_address: str,
     request_id: str | None = None,
     mode: str = "workflow",
     clarification: str | None = None,
     recurring: bool = False,
-    seen_urls: list[str] | None = None,
+    seen_approval_keys: list[str] | None = None,
 ) -> int:
     settings = Settings.from_env()
     request_id = request_id or job_id
-    # One-shot searches carry no memory; a recurring run flags its results
+    # A one-shot scan carries no memory; a recurring run flags its findings
     # against the (possibly empty, on the first run) memory (ADR-033).
-    memory = set(seen_urls or []) if recurring else None
+    memory = set(seen_approval_keys or []) if recurring else None
     log_ctx = {"request_id": request_id, "job_id": job_id, "mode": mode}
-    logger.info("research task started", extra=log_ctx)
+    logger.info("scan task started", extra=log_ctx)
 
     from aiagent.adapters.sink import HttpResultSink
 
@@ -251,9 +212,9 @@ def run_research_task(
     # and the fakes price at $0 so it never trips in the keyless demo.
     budget = SpendGuard(meter, _pricing_for(settings), settings.agent_max_cost_usd)
     try:
-        search, enricher, page_dates = build_providers(settings, meter)
+        source, threat_intel = build_providers(settings, meter)
         policy = build_policy(settings, meter) if mode == "agent" else None
-        critic = build_critic(settings, meter) if mode == "agent" else None
+        revoker = build_revoker(settings, meter) if mode == "agent" else None
     except Exception as exc:
         # Misconfiguration (missing API key...) must surface to the user as a failed job.
         logger.error("agent misconfigured", extra=log_ctx, exc_info=True)
@@ -280,42 +241,48 @@ def run_research_task(
 
     try:
         if policy is not None:
-            # Agent mode (ADR-030/031/032): the policy drives the decisions, the
-            # critic reviews the results before delivery, and the sink also
-            # implements StepReporter + ClarificationRequester. Two orchestrators
-            # (ADR-046) share these ports: the LangGraph StateGraph (default,
-            # durable checkpointing + native interrupt HITL) or the hand-rolled
-            # loop (AGENT_ORCHESTRATOR=loop).
+            # Agent mode (ADR-030/058): the policy drives the scan, and every
+            # DANGEROUS-tier finding is auto-revoked through KeeperHub after
+            # it. The sink also implements StepReporter + ClarificationRequester.
+            # Two orchestrators (ADR-046) share these ports: the LangGraph
+            # StateGraph (default, durable checkpointing + native interrupt
+            # HITL) or the hand-rolled loop (AGENT_ORCHESTRATOR=loop).
+            assert revoker is not None
             outcome = _run_agent(
                 settings,
                 job_id,
-                keyword,
+                wallet_address,
                 clarification,
-                search,
-                enricher,
+                source,
+                threat_intel,
                 policy,
-                critic,
+                revoker,
                 sink,
                 memory,
-                page_dates,
                 budget,
             )
             if outcome is None:
                 # Paused (ADR-032): the job awaits the user's answer; a fresh
                 # task will be dispatched when it arrives.
                 job_outcome = "paused"
-                logger.info("research task paused awaiting user input", extra=log_ctx)
+                logger.info("scan task paused awaiting user input", extra=log_ctx)
                 return 0
             results = outcome
         else:
-            results = run_research(
-                job_id, keyword, search, enricher, sink, seen_urls=memory, page_dates=page_dates
+            results = run_scan(
+                job_id,
+                wallet_address,
+                settings.scan_chain_ids,
+                source,
+                threat_intel,
+                sink,
+                seen_keys=memory,
             )
         job_outcome = "completed"
     except Exception:
-        logger.error("research task failed", extra=log_ctx, exc_info=True)
+        logger.error("scan task failed", extra=log_ctx, exc_info=True)
         raise
     finally:
         report_usage()
-    logger.info("research task completed", extra={**log_ctx, "results": len(results)})
+    logger.info("scan task completed", extra={**log_ctx, "results": len(results)})
     return len(results)

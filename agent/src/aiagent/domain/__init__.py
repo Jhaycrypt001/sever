@@ -1,13 +1,13 @@
 from aiagent.domain.models import (
-    DateConfidence,
-    RawSearchHit,
-    ResearchResult,
-    sort_by_publication_date,
+    ApprovalFinding,
+    RawApproval,
+    RiskTier,
+    sort_by_risk,
 )
 
 __all__ = [
-    "DateConfidence",
-    "RawSearchHit",
-    "ResearchResult",
-    "sort_by_publication_date",
+    "ApprovalFinding",
+    "RawApproval",
+    "RiskTier",
+    "sort_by_risk",
 ]

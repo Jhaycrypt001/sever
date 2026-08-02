@@ -3,12 +3,16 @@ counters/histograms. Driven with an in-memory metric reader and a fake chat
 model — no provider push, no paid call. No-op instruments (telemetry off) are
 covered by every other test simply not crashing."""
 
+import httpx
+import respx
 from opentelemetry import metrics as otel_metrics
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 
 from aiagent import metrics
+from aiagent.adapters.keeperhub import KeeperHubApprovalRevoker
 from aiagent.adapters.llm import ActionReply, LlmAgentPolicy
+from aiagent.domain.models import ApprovalFinding, RiskTier
 
 
 class FakeChat:
@@ -36,6 +40,7 @@ def _points(reader: InMemoryMetricReader, name: str) -> list:
     ]
 
 
+@respx.mock
 def test_agent_metrics_are_recorded() -> None:
     reader = InMemoryMetricReader()
     # First (and only) meter provider the suite sets; the proxy instruments in
@@ -63,3 +68,30 @@ def test_agent_metrics_are_recorded() -> None:
     assert any(p.attributes.get("outcome") == "completed" for p in _points(reader, "aiagent.jobs"))
     cost = _points(reader, "aiagent.job.cost")
     assert any(p.value == 0.25 and p.attributes.get("outcome") == "completed" for p in cost)
+
+    # KeeperHub revocations (ADR-058 amendment): count + call-latency histogram.
+    respx.post("https://app.keeperhub.com/api/execute/contract-call").mock(
+        return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
+    )
+    respx.get("https://app.keeperhub.com/api/execute/exec-1/status").mock(
+        return_value=httpx.Response(200, json={"status": "completed", "transactionHash": "0x1"})
+    )
+    KeeperHubApprovalRevoker(
+        "https://app.keeperhub.com", "kh_test_key", poll_interval_seconds=0
+    ).revoke(
+        ApprovalFinding(
+            chain_id="1",
+            token_address="0xtoken",
+            token_symbol="USDC",
+            spender_address="0xbad",
+            approved_amount="Unlimited",
+            tier=RiskTier.DANGEROUS,
+        )
+    )
+    revocations = _points(reader, "aiagent.revocations")
+    assert any(
+        p.attributes.get("tier") == "dangerous" and p.attributes.get("outcome") == "revoked"
+        for p in revocations
+    )
+    revocation_durations = _points(reader, "aiagent.revocation.call.duration")
+    assert any(p.attributes.get("outcome") == "revoked" for p in revocation_durations)

@@ -17,9 +17,10 @@ pub enum JobStatus {
     Failed,
 }
 
-/// How the research runs (ADR-030): the fixed pipeline, or the agentic loop
-/// where the LLM policy decides the queries and when to stop. The default
-/// keeps pre-ADR-030 clients and payloads working unchanged.
+/// How the scan runs (ADR-030/058): the fixed pipeline, or the agentic loop
+/// where the LLM policy decides which chains to scan, when to stop, and
+/// (agent mode only) auto-revokes DANGEROUS-tier approvals afterward. The
+/// default keeps pre-ADR-058 clients and payloads working unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum JobMode {
@@ -28,9 +29,10 @@ pub enum JobMode {
     Agent,
 }
 
-/// One decision of the agentic loop (ADR-030), recorded for the live journal.
-/// `kind` stays an open string ("search" / "finish" today) so newer agents can
-/// introduce step kinds without breaking older backends.
+/// One decision of the agentic loop (ADR-030/058), recorded for the live
+/// journal. `kind` stays an open string ("scan" / "finish" / "revoke" /
+/// "report" today) so newer agents can introduce step kinds without breaking
+/// older backends.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct AgentStep {
     pub seq: i32,
@@ -62,19 +64,28 @@ impl JobUsage {
     }
 }
 
-/// Input caps (ADR-056): reject oversized free-text at the domain boundary,
+/// Input cap (ADR-056): reject oversized free-text at the domain boundary,
 /// before it reaches storage, the agent or an outbound webhook. Measured in
 /// Unicode scalar values (`chars`), generous enough that no legitimate value
-/// hits them — they only stop abusive/accidental multi-KB payloads.
-pub const MAX_KEYWORD_LEN: usize = 200;
+/// hits it — it only stops abusive/accidental multi-KB payloads.
 pub const MAX_ANSWER_LEN: usize = 2_000;
+
+/// True for a syntactically valid EVM address: `0x` followed by exactly 40
+/// hex digits. Deliberately no checksum validation (EIP-55 mixed-case) — a
+/// lowercase address is common and legitimate; correctness of the address
+/// itself is verified onchain when KeeperHub submits the revocation, not here.
+pub(crate) fn is_valid_evm_address(value: &str) -> bool {
+    value
+        .strip_prefix("0x")
+        .is_some_and(|hex| hex.len() == 40 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+}
 
 #[derive(Debug, thiserror::Error, PartialEq)]
 pub enum JobError {
-    #[error("keyword must not be empty")]
-    EmptyKeyword,
-    #[error("keyword must be at most 200 characters")]
-    KeywordTooLong,
+    #[error("wallet address must not be empty")]
+    EmptyWalletAddress,
+    #[error("wallet address must be a 0x-prefixed 40 hex character EVM address")]
+    InvalidWalletAddress,
     #[error("interval must be between 1 minute and 7 days")]
     InvalidInterval,
     #[error("webhook url must start with http:// or https://")]
@@ -92,10 +103,10 @@ pub enum JobError {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResearchJob {
+pub struct ScanJob {
     pub id: Uuid,
     pub user_id: Uuid,
-    pub keyword: String,
+    pub wallet_address: String,
     pub mode: JobMode,
     pub status: JobStatus,
     pub error: Option<String>,
@@ -103,8 +114,8 @@ pub struct ResearchJob {
     /// user replied, the answer forwarded back to the agent on re-dispatch.
     pub question: Option<String>,
     pub answer: Option<String>,
-    /// Set when the job was launched by the scheduler for a recurring search
-    /// (ADR-033); one-shot searches leave it null.
+    /// Set when the job was launched by the scheduler for a recurring scan
+    /// (ADR-033); one-shot scans leave it null.
     pub recurring_search_id: Option<Uuid>,
     /// Accumulated API spend (ADR-038); written only through
     /// `JobRepository::add_usage`, never by `update`.
@@ -113,19 +124,19 @@ pub struct ResearchJob {
     pub completed_at: Option<DateTime<Utc>>,
 }
 
-impl ResearchJob {
-    pub fn new(user_id: Uuid, keyword: &str) -> Result<Self, JobError> {
-        let keyword = keyword.trim();
-        if keyword.is_empty() {
-            return Err(JobError::EmptyKeyword);
+impl ScanJob {
+    pub fn new(user_id: Uuid, wallet_address: &str) -> Result<Self, JobError> {
+        let wallet_address = wallet_address.trim();
+        if wallet_address.is_empty() {
+            return Err(JobError::EmptyWalletAddress);
         }
-        if keyword.chars().count() > MAX_KEYWORD_LEN {
-            return Err(JobError::KeywordTooLong);
+        if !is_valid_evm_address(wallet_address) {
+            return Err(JobError::InvalidWalletAddress);
         }
         Ok(Self {
             id: Uuid::new_v4(),
             user_id,
-            keyword: keyword.to_string(),
+            wallet_address: wallet_address.to_string(),
             mode: JobMode::default(),
             status: JobStatus::Pending,
             error: None,
@@ -143,7 +154,7 @@ impl ResearchJob {
         self
     }
 
-    /// Links a scheduler-launched run to its recurring search (ADR-033).
+    /// Links a scheduler-launched run to its recurring scan (ADR-033).
     pub fn with_recurring(mut self, recurring_search_id: Uuid) -> Self {
         self.recurring_search_id = Some(recurring_search_id);
         self
@@ -217,36 +228,41 @@ impl ResearchJob {
 mod tests {
     use super::*;
 
+    const ADDR: &str = "0x1234567890123456789012345678901234567890";
+
     #[test]
-    fn new_job_starts_pending_with_trimmed_keyword() {
-        let job = ResearchJob::new(Uuid::new_v4(), "  rust async  ").unwrap();
+    fn new_job_starts_pending_with_trimmed_wallet_address() {
+        let job = ScanJob::new(Uuid::new_v4(), &format!("  {ADDR}  ")).unwrap();
         assert_eq!(job.status, JobStatus::Pending);
-        assert_eq!(job.keyword, "rust async");
+        assert_eq!(job.wallet_address, ADDR);
         assert!(job.error.is_none());
         assert!(job.completed_at.is_none());
     }
 
     #[test]
-    fn empty_keyword_is_rejected() {
-        let err = ResearchJob::new(Uuid::new_v4(), "   ").unwrap_err();
-        assert_eq!(err, JobError::EmptyKeyword);
+    fn empty_wallet_address_is_rejected() {
+        let err = ScanJob::new(Uuid::new_v4(), "   ").unwrap_err();
+        assert_eq!(err, JobError::EmptyWalletAddress);
     }
 
     #[test]
-    fn overlong_keyword_is_rejected() {
-        // ADR-056: the cap is on the trimmed value, in characters.
-        let at_limit = "x".repeat(MAX_KEYWORD_LEN);
-        assert!(ResearchJob::new(Uuid::new_v4(), &at_limit).is_ok());
-        let too_long = "x".repeat(MAX_KEYWORD_LEN + 1);
-        assert_eq!(
-            ResearchJob::new(Uuid::new_v4(), &too_long).unwrap_err(),
-            JobError::KeywordTooLong
-        );
+    fn malformed_wallet_address_is_rejected() {
+        for bad in [
+            "0x123",
+            "not-an-address",
+            "1234567890123456789012345678901234567890",
+        ] {
+            assert_eq!(
+                ScanJob::new(Uuid::new_v4(), bad).unwrap_err(),
+                JobError::InvalidWalletAddress
+            );
+        }
+        assert!(is_valid_evm_address(ADDR));
     }
 
     #[test]
     fn overlong_answer_is_rejected() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.request_input("which one?").unwrap();
         assert_eq!(
             job.provide_answer(&"x".repeat(MAX_ANSWER_LEN + 1))
@@ -257,7 +273,7 @@ mod tests {
 
     #[test]
     fn complete_sets_status_and_timestamp() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.complete();
         assert_eq!(job.status, JobStatus::Completed);
         assert!(job.completed_at.is_some());
@@ -265,7 +281,7 @@ mod tests {
 
     #[test]
     fn fail_records_the_error() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.fail("boom".into());
         assert_eq!(job.status, JobStatus::Failed);
         assert_eq!(job.error.as_deref(), Some("boom"));
@@ -273,7 +289,7 @@ mod tests {
 
     #[test]
     fn start_transitions_only_from_pending() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.start();
         assert_eq!(job.status, JobStatus::Running);
 
@@ -284,7 +300,7 @@ mod tests {
 
     #[test]
     fn late_completion_overwrites_a_timeout_failure() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.fail("timed out".into());
         job.complete();
         assert_eq!(job.status, JobStatus::Completed);
@@ -293,7 +309,7 @@ mod tests {
 
     #[test]
     fn failure_never_clobbers_a_completed_job() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.complete();
         job.fail("late duplicate".into());
         assert_eq!(job.status, JobStatus::Completed);
@@ -302,19 +318,19 @@ mod tests {
 
     #[test]
     fn request_input_pauses_a_running_job_idempotently() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.start();
-        job.request_input("Animal or car?").unwrap();
+        job.request_input("Which chains?").unwrap();
         assert_eq!(job.status, JobStatus::AwaitingInput);
-        assert_eq!(job.question.as_deref(), Some("Animal or car?"));
+        assert_eq!(job.question.as_deref(), Some("Which chains?"));
 
-        job.request_input("Animal or car?").unwrap(); // Celery retry
+        job.request_input("Which chains?").unwrap(); // Celery retry
         assert_eq!(job.status, JobStatus::AwaitingInput);
     }
 
     #[test]
     fn request_input_never_reopens_a_finished_job() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.complete();
         job.request_input("late question").unwrap();
         assert_eq!(job.status, JobStatus::Completed);
@@ -323,28 +339,31 @@ mod tests {
 
     #[test]
     fn empty_question_is_rejected() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.start();
         assert_eq!(job.request_input("  "), Err(JobError::EmptyQuestion));
     }
 
     #[test]
     fn provide_answer_requeues_the_job_with_the_answer() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.start();
-        job.request_input("Animal or car?").unwrap();
+        job.request_input("Which chains?").unwrap();
 
-        job.provide_answer(" the car ").unwrap();
+        job.provide_answer(" ethereum only ").unwrap();
 
         assert_eq!(job.status, JobStatus::Pending);
-        assert_eq!(job.answer.as_deref(), Some("the car"));
-        assert_eq!(job.question.as_deref(), Some("Animal or car?"));
+        assert_eq!(job.answer.as_deref(), Some("ethereum only"));
+        assert_eq!(job.question.as_deref(), Some("Which chains?"));
     }
 
     #[test]
     fn provide_answer_requires_the_awaiting_state_and_a_non_empty_answer() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
-        assert_eq!(job.provide_answer("cars"), Err(JobError::NotAwaitingInput));
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
+        assert_eq!(
+            job.provide_answer("ethereum"),
+            Err(JobError::NotAwaitingInput)
+        );
         job.start();
         job.request_input("q?").unwrap();
         assert_eq!(job.provide_answer("   "), Err(JobError::EmptyAnswer));
@@ -352,7 +371,7 @@ mod tests {
 
     #[test]
     fn awaiting_input_is_not_a_terminal_state() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         job.start();
         job.request_input("q?").unwrap();
         assert!(!job.is_finished());
@@ -360,7 +379,7 @@ mod tests {
 
     #[test]
     fn is_finished_matches_terminal_states() {
-        let mut job = ResearchJob::new(Uuid::new_v4(), "k").unwrap();
+        let mut job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
         assert!(!job.is_finished());
         job.start();
         assert!(!job.is_finished());

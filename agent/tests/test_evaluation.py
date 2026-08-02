@@ -1,119 +1,69 @@
-"""Model evaluation harness (ADR-045): the scoring and runner are pure and
+"""Model evaluation harness (ADR-045/058): the scoring and runner are pure and
 tested here with fakes — no paid call. The CLI (`main`) touches real providers
 and is exercised by hand, like the live tests."""
-
-from datetime import UTC, date, datetime
 
 import pytest
 
 from aiagent.config import Settings
-from aiagent.domain.models import (
-    Critique,
-    EventType,
-    FinishAction,
-    HitEnrichment,
-    RawSearchHit,
-    SearchAction,
-)
+from aiagent.domain.models import FinishAction, RawApproval, RiskAssessment, ScanAction
 from aiagent.evaluation import (
-    CriticCase,
-    EnrichmentCase,
+    ExplanationCase,
     PolicyCase,
     Report,
     _settings_for_spec,
     evaluate,
     format_table,
-    score_critic,
-    score_enrichment,
+    score_explanation,
     score_policy,
 )
 
 
-def a_hit(url: str = "https://x") -> RawSearchHit:
-    return RawSearchHit(title="T", url=url, snippet="s")
+def an_approval(spender: str = "0xspender") -> RawApproval:
+    return RawApproval(
+        chain_id="1",
+        token_address="0xtoken",
+        token_symbol="TKN",
+        spender_address=spender,
+        approved_amount="Unlimited",
+    )
 
 
 # ---------------------------------------------------------------- scoring
 
 
-def test_score_enrichment_perfect_is_one() -> None:
-    case = EnrichmentCase("c", a_hit(), date(2026, 3, 12), frozenset({EventType.RELEASE}))
-    got = HitEnrichment(
-        published_at=datetime(2026, 3, 12, tzinfo=UTC),
-        event_type=EventType.RELEASE,
-        summary="A release.",
-    )
-    score, _ = score_enrichment(case, got)
-    assert score == 1.0
+def test_score_explanation_rewards_a_real_explanation() -> None:
+    assert score_explanation("A known drainer contract with an unlimited approval.")[0] == 1.0
 
 
-def test_score_enrichment_penalizes_a_hallucinated_date() -> None:
-    # Expected no date, but the model invented one -> only 2/3 checks pass.
-    case = EnrichmentCase("c", a_hit(), None, frozenset({EventType.OPINION}))
-    got = HitEnrichment(
-        published_at=datetime(2020, 1, 1, tzinfo=UTC),
-        event_type=EventType.OPINION,
-        summary="S.",
-    )
-    score, detail = score_enrichment(case, got)
-    assert score == pytest.approx(2 / 3)
-    assert "date=X" in detail
+def test_score_explanation_penalizes_empty_or_absent() -> None:
+    assert score_explanation(None)[0] == 0.0
+    assert score_explanation("   ")[0] == 0.0
 
 
-def test_score_enrichment_penalizes_wrong_type_and_missing_summary() -> None:
-    case = EnrichmentCase("c", a_hit(), None, frozenset({EventType.OPINION}))
-    got = HitEnrichment(published_at=None, event_type=EventType.OTHER, summary="  ")
-    score, _ = score_enrichment(case, got)
-    assert score == pytest.approx(1 / 3)  # only the date check passes
+def test_score_explanation_penalizes_implausibly_long_output() -> None:
+    assert score_explanation("x" * 500)[0] == 0.0
 
 
 def test_score_policy_is_all_or_nothing() -> None:
-    case = PolicyCase("c", "goal", [], [], expected_kind="search")
-    assert score_policy(case, SearchAction(query="q", reason="r"))[0] == 1.0
+    case = PolicyCase("c", "goal", [], [], expected_kind="scan")
+    assert score_policy(case, ScanAction(chain_id="1", reason="r"))[0] == 1.0
     assert score_policy(case, FinishAction(reason="r"))[0] == 0.0
-
-
-def test_score_critic_rewards_assessment_and_recall() -> None:
-    case = CriticCase("c", "goal", [], frozenset({"https://noise"}))
-    good = Critique(assessment="Solid coverage.", irrelevant_urls=("https://noise",))
-    assert score_critic(case, good)[0] == 1.0
-
-
-def test_score_critic_penalizes_missed_noise_and_fallback_assessment() -> None:
-    case = CriticCase("c", "goal", [], frozenset({"https://noise"}))
-    # Missed the noise but gave an assessment -> 0.5.
-    half = Critique(assessment="Looks fine.", irrelevant_urls=())
-    assert score_critic(case, half)[0] == 0.5
-    # Neutral fallback assessment does not count as a real one.
-    fallback = Critique(
-        assessment="self-critique unavailable (reply was not valid JSON)",
-        irrelevant_urls=("https://noise",),
-    )
-    # Recall is perfect but the assessment is the neutral fallback -> 0.5.
-    assert score_critic(case, fallback)[0] == 0.5
-
-
-def test_score_critic_penalizes_false_drops() -> None:
-    case = CriticCase("c", "goal", [], frozenset())  # nothing should be dropped
-    over = Critique(assessment="Good.", irrelevant_urls=("https://on-topic",))
-    assert score_critic(case, over)[0] == 0.5
 
 
 # ---------------------------------------------------------------- report
 
 
 def test_report_aggregates_by_capability_and_overall() -> None:
-    report = Report()
     from aiagent.evaluation import CaseResult
 
+    report = Report()
     report.results = [
-        CaseResult("enrichment", "a", 1.0, 0.1, ""),
-        CaseResult("enrichment", "b", 0.0, 0.2, ""),
+        CaseResult("explanation", "a", 1.0, 0.1, ""),
+        CaseResult("explanation", "b", 0.0, 0.2, ""),
         CaseResult("policy", "c", 1.0, 0.3, ""),
     ]
-    assert report.capability_score("enrichment") == 0.5
+    assert report.capability_score("explanation") == 0.5
     assert report.capability_score("policy") == 1.0
-    assert report.capability_score("critic") is None
     # Overall is the mean of the capabilities that ran (0.5, 1.0) = 0.75.
     assert report.overall() == 0.75
     assert report.total_latency() == pytest.approx(0.6)
@@ -122,54 +72,42 @@ def test_report_aggregates_by_capability_and_overall() -> None:
 # ---------------------------------------------------------------- runner
 
 
-class FakeEnricher:
-    def __init__(self, enrichment: HitEnrichment) -> None:
-        self._e = enrichment
+class FakeThreatIntel:
+    def __init__(self, assessment: RiskAssessment) -> None:
+        self._a = assessment
 
-    def enrich_many(self, hits: list[RawSearchHit]) -> list[HitEnrichment]:
-        return [self._e for _ in hits]
+    def assess_many(self, approvals: list[RawApproval]) -> list[RiskAssessment]:
+        return [self._a for _ in approvals]
 
 
-class RaisingEnricher:
-    def enrich_many(self, hits: list[RawSearchHit]) -> list[HitEnrichment]:
+class RaisingThreatIntel:
+    def assess_many(self, approvals: list[RawApproval]) -> list[RiskAssessment]:
         raise RuntimeError("model exploded")
 
 
 class FakePolicy:
-    def decide(self, goal, steps, hits):  # noqa: ANN001, ANN201
-        return SearchAction(query="q", reason="r")
-
-
-class FakeCritic:
-    def critique(self, goal, hits):  # noqa: ANN001, ANN201
-        return Critique(assessment="Fine.", irrelevant_urls=())
+    def decide(self, goal, steps, approvals):  # noqa: ANN001, ANN201
+        return ScanAction(chain_id="1", reason="r")
 
 
 def test_evaluate_runs_all_capabilities() -> None:
-    enricher = FakeEnricher(HitEnrichment(event_type=EventType.RELEASE, summary="S."))
-    report = evaluate(
-        enricher,  # type: ignore[arg-type]
-        FakePolicy(),  # type: ignore[arg-type]
-        FakeCritic(),  # type: ignore[arg-type]
-    )
+    threat_intel = FakeThreatIntel(RiskAssessment(explanation="Looks fine."))
+    report = evaluate(threat_intel, FakePolicy())  # type: ignore[arg-type]
     caps = {r.capability for r in report.results}
-    assert caps == {"enrichment", "policy", "critic"}
+    assert caps == {"explanation", "policy"}
     assert all(r.error is None for r in report.results)
 
 
 def test_evaluate_turns_a_raised_error_into_a_zero_scored_result() -> None:
     report = evaluate(
-        RaisingEnricher(),  # type: ignore[arg-type]
+        RaisingThreatIntel(),  # type: ignore[arg-type]
         FakePolicy(),  # type: ignore[arg-type]
-        FakeCritic(),  # type: ignore[arg-type]
-        enrichment_cases=[
-            EnrichmentCase("boom", a_hit(), None, frozenset({EventType.OTHER})),
-        ],
+        explanation_cases=[ExplanationCase("boom", an_approval())],
     )
-    enrichment_results = [r for r in report.results if r.capability == "enrichment"]
-    assert len(enrichment_results) == 1
-    assert enrichment_results[0].score == 0.0
-    assert "model exploded" in (enrichment_results[0].error or "")
+    explanation_results = [r for r in report.results if r.capability == "explanation"]
+    assert len(explanation_results) == 1
+    assert explanation_results[0].score == 0.0
+    assert "model exploded" in (explanation_results[0].error or "")
 
 
 # ---------------------------------------------------------------- CLI helpers
@@ -182,7 +120,11 @@ def _base_settings() -> Settings:
         internal_api_token="t",
         agent_model_id="claude-opus-4-8",
         providers="live",
-        search_providers=["tavily"],
+        scan_chain_ids=["1"],
+        goplus_api_key="",
+        keeperhub_api_url="https://app.keeperhub.com",
+        keeperhub_api_key="kh_key",
+        keeperhub_simulate_only=False,
         agent_max_steps=5,
         agent_max_cost_usd=2.0,
         agent_orchestrator="langgraph",
@@ -212,7 +154,7 @@ def test_settings_for_spec_rejects_a_spec_without_a_model() -> None:
 def test_format_table_lists_every_model_and_the_headers() -> None:
     from aiagent.evaluation import CaseResult
 
-    report = Report(results=[CaseResult("enrichment", "a", 1.0, 0.5, "")])
+    report = Report(results=[CaseResult("explanation", "a", 1.0, 0.5, "")])
     table = format_table([("ollama:gemma4:latest", report, 0.0)])
     assert "MODEL" in table and "overall" in table
     assert "ollama:gemma4:latest" in table
@@ -230,8 +172,8 @@ def _report_scoring(overall_pairs: list[tuple[str, float]]) -> Report:
 def test_failures_below_returns_models_under_the_bar() -> None:
     from aiagent.evaluation import failures_below
 
-    passing = ("anthropic:good", _report_scoring([("enrichment", 1.0), ("policy", 1.0)]), 0.0)
-    failing = ("ollama:weak", _report_scoring([("enrichment", 0.4), ("policy", 0.6)]), 0.0)
+    passing = ("anthropic:good", _report_scoring([("explanation", 1.0), ("policy", 1.0)]), 0.0)
+    failing = ("ollama:weak", _report_scoring([("explanation", 0.4), ("policy", 0.6)]), 0.0)
     msgs = failures_below([passing, failing], 0.8)
     assert len(msgs) == 1
     assert "ollama:weak" in msgs[0]
@@ -241,5 +183,5 @@ def test_failures_below_returns_models_under_the_bar() -> None:
 def test_failures_below_is_empty_when_every_model_clears_the_bar() -> None:
     from aiagent.evaluation import failures_below
 
-    rows = [("anthropic:good", _report_scoring([("enrichment", 0.9), ("policy", 1.0)]), 0.0)]
+    rows = [("anthropic:good", _report_scoring([("explanation", 0.9), ("policy", 1.0)]), 0.0)]
     assert failures_below(rows, 0.8) == []

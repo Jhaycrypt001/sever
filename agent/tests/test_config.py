@@ -62,7 +62,7 @@ def test_worker_startup_check_skips_api_keys_with_fake_providers(monkeypatch) ->
 
     monkeypatch.setenv("AGENT_PROVIDERS", "fake")
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.delenv("TAVILY_API_KEY", raising=False)
+    monkeypatch.delenv("KEEPERHUB_API_KEY", raising=False)
     _check_required_env()  # must not raise
 
     monkeypatch.setenv("AGENT_PROVIDERS", "live")
