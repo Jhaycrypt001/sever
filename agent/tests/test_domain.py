@@ -43,12 +43,36 @@ def test_classify_risk_unverified_spender_is_watch() -> None:
 
 def test_classify_risk_verified_non_malicious_spender_is_safe() -> None:
     assert classify_risk(approval("0xa", {"is_open_source": 1})) == RiskTier.SAFE
-    assert classify_risk(approval("0xa", {})) == RiskTier.SAFE  # defaults to open-source
 
 
 def test_classify_risk_malicious_wins_over_unverified() -> None:
     raw = {"malicious_address": True, "is_open_source": 0}
     assert classify_risk(approval("0xa", raw)) == RiskTier.DANGEROUS
+
+
+def test_classify_risk_string_flags_are_read_by_value_not_truthiness() -> None:
+    # bool("0") is True in Python. If a provider ever switches these int
+    # fields to strings, bare truthiness would mark a clean spender DANGEROUS
+    # and auto-revoke it with a real transaction. Pin both directions.
+    assert classify_risk(approval("0xa", {"malicious_address": "0", "is_open_source": "1"})) == (
+        RiskTier.SAFE
+    )
+    assert classify_risk(approval("0xa", {"malicious_address": "1"})) == RiskTier.DANGEROUS
+    assert classify_risk(approval("0xa", {"is_open_source": "0"})) == RiskTier.WATCH
+
+
+def test_classify_risk_unknown_signals_never_authorize_a_revocation() -> None:
+    # Missing/unreadable data must not produce DANGEROUS (the only tier that
+    # spends real gas). It degrades to WATCH: "unable to audit".
+    for raw in ({}, {"malicious_address": None}, {"is_open_source": "maybe"}):
+        assert classify_risk(approval("0xa", raw)) == RiskTier.WATCH
+
+
+def test_classify_risk_never_auto_revokes_a_provider_trusted_spender() -> None:
+    # Contradictory signals (trusted *and* flagged) must not broadcast a
+    # transaction against a router every wallet approves; surface it instead.
+    raw = {"malicious_address": True, "trust_list": 1, "is_open_source": 1}
+    assert classify_risk(approval("0xa", raw)) == RiskTier.WATCH
 
 
 def test_sort_by_risk_dangerous_first_then_watch_then_safe() -> None:

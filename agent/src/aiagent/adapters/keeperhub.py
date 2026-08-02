@@ -125,9 +125,11 @@ class KeeperHubApprovalRevoker:
         data = response.json()
 
         # simulate=true: synchronous result, nothing to poll (see module docstring).
+        # A dry run never reports REVOKED — no transaction was broadcast, so the
+        # approval is still live and the user must not be told otherwise.
         if data.get("status") == "simulated":
             if data.get("success") and not data.get("wouldRevert", True):
-                return replace(finding, revocation_status=RevocationStatus.REVOKED)
+                return replace(finding, revocation_status=RevocationStatus.SIMULATED)
             logger.error(
                 "KeeperHub simulation would revert",
                 extra={"spender": finding.spender_address, "response": data},

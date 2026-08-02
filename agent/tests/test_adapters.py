@@ -80,13 +80,16 @@ class FakeChatModel:
 
 
 def an_approval(symbol: str = "TKN", malicious: bool = False) -> RawApproval:
+    # `is_open_source` is always present on the real GoPlus payload; include it
+    # so the fixture represents a verified spender rather than one classify_risk
+    # must treat as unauditable (which now degrades to WATCH — ADR-058).
     return RawApproval(
         chain_id="1",
         token_address="0xtoken",
         token_symbol=symbol,
         spender_address="0xspender",
         approved_amount="Unlimited",
-        raw={"malicious_address": malicious},
+        raw={"malicious_address": malicious, "is_open_source": 1},
     )
 
 

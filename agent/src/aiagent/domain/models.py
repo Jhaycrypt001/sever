@@ -23,10 +23,18 @@ class RiskTier(StrEnum):
 
 class RevocationStatus(StrEnum):
     """What happened when a dangerous approval was sent for revocation
-    (ADR-058)."""
+    (ADR-058).
+
+    `REVOKED` means one thing only: a transaction was broadcast and confirmed
+    onchain, and `revocation_tx_hash` proves it. A dry run gets its own
+    `SIMULATED` status rather than borrowing `REVOKED`, because telling a user
+    a draining approval is gone when no transaction exists is the single worst
+    lie this product could tell.
+    """
 
     NOT_ATTEMPTED = "not_attempted"
     PENDING = "pending"
+    SIMULATED = "simulated"
     REVOKED = "revoked"
     FAILED = "failed"
 
@@ -54,16 +62,64 @@ def raw_approval_key(chain_id: str, token_address: str, spender_address: str) ->
     return f"{chain_id}:{token_address}:{spender_address}".lower()
 
 
+#: Values a threat-intel provider may use for a true/false flag. Bare
+#: truthiness is unsafe here: `bool("0")` is True in Python, so a provider
+#: that switches an int 0/1 field to a string "0"/"1" would silently invert
+#: every risk decision — and this tier is what fires real transactions.
+_TRUE_FLAGS = frozenset({"1", "true", "yes"})
+_FALSE_FLAGS = frozenset({"0", "false", "no", ""})
+
+
+def flag_state(value: Any) -> bool | None:
+    """Strict tri-state read of a provider flag: True, False, or None when the
+    value is missing or in a shape this code does not recognize. Callers decide
+    which way an unknown resolves — never silently, because the two directions
+    have very different consequences (ADR-058)."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):  # GoPlus returns 0/1 ints on this endpoint today
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_FLAGS:
+            return True
+        if normalized in _FALSE_FLAGS:
+            return False
+    return None
+
+
 def classify_risk(approval: RawApproval) -> RiskTier:
     """The one place the risk tier is decided (ADR-058) — a deterministic
     rule over GoPlus's own verified signals, called identically by every
     `ThreatIntel` adapter (fake and live). An LLM never sets the tier: it may
     only explain one already classified here, so a hallucinated judgment can
-    never upgrade or downgrade what gets auto-revoked."""
+    never upgrade or downgrade what gets auto-revoked.
+
+    Unknown signals resolve in the direction that is safe for the *action*
+    the tier authorizes, which is not the same direction for both flags:
+
+    - `malicious_address` unknown -> **not** dangerous. DANGEROUS is the only
+      tier that spends real gas on a real transaction, so it requires a
+      positive, recognized malicious signal. Never revoke on a shrug.
+    - `is_open_source` unknown -> **not** open source, i.e. WATCH. That tier
+      means "unable to audit", which is exactly what a missing or unreadable
+      verification flag tells us. WATCH only surfaces the finding to the user,
+      so erring toward it costs nothing but noise.
+
+    A spender on the provider's own **trust list** is never auto-revoked. When
+    a provider both trusts and flags the same contract the signals contradict
+    each other, and the safe response to a contradiction is to show a human
+    rather than to broadcast a transaction — so it degrades to WATCH instead
+    of DANGEROUS. Without this, one bad upstream flag on a router every wallet
+    approves (Uniswap, Permit2...) would revoke a live position automatically.
+    """
     raw = approval.raw
-    if raw.get("malicious_address"):
-        return RiskTier.DANGEROUS
-    if not raw.get("is_open_source", 1):
+    trusted = flag_state(raw.get("trust_list")) is True
+    if flag_state(raw.get("malicious_address")) is True:
+        return RiskTier.WATCH if trusted else RiskTier.DANGEROUS
+    if flag_state(raw.get("is_open_source")) is not True:
         return RiskTier.WATCH
     return RiskTier.SAFE
 

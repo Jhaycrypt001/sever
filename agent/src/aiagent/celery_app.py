@@ -6,7 +6,7 @@ from typing import Any
 from celery import Celery
 from celery.signals import setup_logging, worker_init, worker_process_init
 
-from aiagent.config import forbid_placeholders, require_env
+from aiagent.config import forbid_non_executing_modes, forbid_placeholders, require_env
 from aiagent.logging_setup import configure_logging
 from aiagent.telemetry import configure_telemetry
 
@@ -44,6 +44,8 @@ def _check_required_env(**_kwargs: Any) -> None:
             keys.append("ANTHROPIC_API_KEY")
         require_env("agent-worker", *keys)
     forbid_placeholders("agent-worker", "INTERNAL_API_TOKEN")
+    # ADR-058: never let a deployment claim revocations it did not broadcast.
+    forbid_non_executing_modes("agent-worker")
 
 
 app = Celery("aiagent", broker=_redis_url, backend=_redis_url, include=["aiagent.tasks"])

@@ -23,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from aiagent.domain.models import RawApproval
+from aiagent.domain.models import RawApproval, flag_state
 from aiagent.domain.usage import UsageMeter
 
 _BASE_URL = "https://api.gopluslabs.io/api/v2/token_approval_security"
@@ -34,14 +34,29 @@ def _spender_info(approval: dict[str, Any]) -> dict[str, Any]:
     return info if isinstance(info, dict) else {}
 
 
+def _behavior_list(value: Any) -> list[str]:
+    """GoPlus reports behaviours as a list of tags; anything else (a bare
+    string, null) is normalized rather than trusted, so a shape change cannot
+    turn into a bogus risk signal downstream."""
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    if isinstance(value, str) and value.strip():
+        return [value.strip()]
+    return []
+
+
 def _to_raw_approval(chain_id: str, token: dict[str, Any], approval: dict[str, Any]) -> RawApproval:
     spender = _spender_info(approval)
-    spender_behavior = spender.get("malicious_behavior") or []
-    token_behavior = token.get("malicious_behavior") or []
+    spender_behavior = _behavior_list(spender.get("malicious_behavior"))
+    token_behavior = _behavior_list(token.get("malicious_behavior"))
+    # Raw flags are passed through untouched; `classify_risk`'s `flag_state`
+    # owns the coercion, so a provider switching 0/1 ints to "0"/"1" strings
+    # cannot silently invert a decision that spends real gas (ADR-058).
     is_malicious = (
         bool(spender_behavior)
-        or bool(spender.get("doubt_list"))
-        or bool(token.get("malicious_address"))
+        or bool(token_behavior)
+        or flag_state(spender.get("doubt_list")) is True
+        or flag_state(token.get("malicious_address")) is True
     )
     combined_behavior = list(dict.fromkeys([*spender_behavior, *token_behavior]))
     approved_time = approval.get("approved_time")
@@ -55,12 +70,12 @@ def _to_raw_approval(chain_id: str, token: dict[str, Any], approval: dict[str, A
         approval_tx_hash=approval.get("hash") or approval.get("initial_approval_hash"),
         spender_name=spender.get("contract_name") or spender.get("tag"),
         raw={
-            # Normalized for `classify_risk` — the two keys it reads.
+            # Normalized for `classify_risk` — the keys it reads.
             "malicious_address": is_malicious,
-            "is_open_source": bool(spender.get("is_open_source", 1)),
+            "is_open_source": spender.get("is_open_source"),
+            "trust_list": spender.get("trust_list"),
             # Carried through for the explanation/journal, not risk logic.
             "malicious_behavior": combined_behavior,
-            "trust_list": bool(spender.get("trust_list")),
         },
     )
 

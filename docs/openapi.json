@@ -861,10 +861,11 @@
       },
       "RevocationStatus": {
         "type": "string",
-        "description": "What happened when a DANGEROUS-tier approval was sent for revocation\n(ADR-058).",
+        "description": "What happened when a DANGEROUS-tier approval was sent for revocation\n(ADR-058).\n\n`Revoked` means a transaction was broadcast and confirmed onchain, with\n`revocation_tx_hash` to prove it. A dry run is `Simulated`, never\n`Revoked` — the UI must never show a still-live approval as neutralized.",
         "enum": [
           "not_attempted",
           "pending",
+          "simulated",
           "revoked",
           "failed"
         ]

@@ -21,10 +21,13 @@ use chrono::Utc;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+// Valid EVM addresses: 0x + exactly 40 hex characters. ScanJob::new rejects
+// anything else, so a short constant here fails only once a real DATABASE_URL
+// makes these tests actually run.
 const ADDR: &str = "0x1234567890123456789012345678901234567890";
-const ADDR_A: &str = "0x1111111111111111111111111111111111111a";
-const ADDR_B: &str = "0x2222222222222222222222222222222222222b";
-const ADDR_C: &str = "0x3333333333333333333333333333333333333c";
+const ADDR_A: &str = "0x111111111111111111111111111111111111111a";
+const ADDR_B: &str = "0x222222222222222222222222222222222222222b";
+const ADDR_C: &str = "0x333333333333333333333333333333333333333c";
 
 async fn pool() -> Option<PgPool> {
     let Ok(url) = std::env::var("DATABASE_URL") else {
@@ -333,6 +336,40 @@ async fn results_roundtrip_with_replace_semantics() {
     assert_eq!(stored[0].malicious_behavior, vec!["phishing_activities"]);
     assert_eq!(stored[0].explanation.as_deref(), Some("explanation"));
     assert_eq!(stored[0].spender_name.as_deref(), Some("Some Spender"));
+}
+
+/// Migration 0012: a dry run stores `simulated`, which the pre-0012 CHECK
+/// constraint would have rejected outright. `simulated` must never be read
+/// back as `revoked` — that distinction is the whole point of the migration.
+#[tokio::test]
+async fn simulated_revocation_status_roundtrips() {
+    let Some(pool) = pool().await else { return };
+    let user = insert_user(&pool).await;
+    let jobs = PostgresJobRepository::new(pool);
+    let job = ScanJob::new(user.id, ADDR).unwrap();
+    jobs.insert(&job).await.unwrap();
+
+    let finding = ApprovalFinding {
+        chain_id: "11155111".into(),
+        token_address: "0xtoken000000000000000000000000000000000".into(),
+        token_symbol: "WETH".into(),
+        spender_address: ADDR_A.into(),
+        spender_name: None,
+        approved_amount: "Unlimited".into(),
+        tier: RiskTier::Dangerous,
+        malicious_behavior: vec![],
+        explanation: None,
+        is_new: true,
+        revocation_status: RevocationStatus::Simulated,
+        revocation_tx_hash: None,
+        raw: serde_json::Value::Null,
+    };
+    jobs.store_results(job.id, &[finding]).await.unwrap();
+
+    let stored = jobs.results_for(job.id).await.unwrap();
+    assert_eq!(stored[0].revocation_status, RevocationStatus::Simulated);
+    assert_ne!(stored[0].revocation_status, RevocationStatus::Revoked);
+    assert!(stored[0].revocation_tx_hash.is_none());
 }
 
 /// Agent mode + journal roundtrip (ADR-030): the mode survives persistence and

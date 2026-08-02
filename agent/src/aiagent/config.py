@@ -40,6 +40,34 @@ def forbid_placeholders(component: str, *names: str) -> None:
         raise SystemExit(1)
 
 
+def forbid_non_executing_modes(component: str) -> None:
+    """Production-only guard (ADR-058): refuse to start in any mode that would
+    report a revocation the worker never actually performed.
+
+    Two settings make the agent *look* like it is protecting a wallet while no
+    transaction is ever broadcast — `AGENT_PROVIDERS=fake` (a fabricated tx
+    hash) and `KEEPERHUB_SIMULATE_ONLY=true` (a dry run). Both are legitimate
+    for demos, CI and rehearsals, and both are catastrophic if they reach a
+    real deployment: the user is told a draining approval is gone while it is
+    still live. A security tool that lies in that direction is worse than no
+    tool, so production refuses to boot rather than degrade silently."""
+    if os.environ.get("APP_ENV") != "production":
+        return
+    unsafe = []
+    if os.environ.get("AGENT_PROVIDERS", "live") == "fake":
+        unsafe.append("AGENT_PROVIDERS=fake (revocations are fabricated, never broadcast)")
+    if os.environ.get("KEEPERHUB_SIMULATE_ONLY", "").lower() in ("1", "true", "yes"):
+        unsafe.append("KEEPERHUB_SIMULATE_ONLY=true (dry run, no transaction is broadcast)")
+    if unsafe:
+        logger.error(
+            "%s cannot start in production: %s. These modes report protection "
+            "that was never applied; unset them or leave APP_ENV unset.",
+            component,
+            "; ".join(unsafe),
+        )
+        raise SystemExit(1)
+
+
 @dataclass(frozen=True)
 class Settings:
     redis_url: str

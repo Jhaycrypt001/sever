@@ -161,6 +161,7 @@ fn revocation_status_to_str(status: RevocationStatus) -> &'static str {
     match status {
         RevocationStatus::NotAttempted => "not_attempted",
         RevocationStatus::Pending => "pending",
+        RevocationStatus::Simulated => "simulated",
         RevocationStatus::Revoked => "revoked",
         RevocationStatus::Failed => "failed",
     }
@@ -171,6 +172,7 @@ fn revocation_status_to_str(status: RevocationStatus) -> &'static str {
 fn revocation_status_from_str(value: &str) -> RevocationStatus {
     match value {
         "pending" => RevocationStatus::Pending,
+        "simulated" => RevocationStatus::Simulated,
         "revoked" => RevocationStatus::Revoked,
         "failed" => RevocationStatus::Failed,
         _ => RevocationStatus::NotAttempted,

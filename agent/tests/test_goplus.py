@@ -6,6 +6,7 @@ import pytest
 import respx
 
 from aiagent.adapters.goplus import GoPlusApprovalSource
+from aiagent.domain.models import RiskTier, classify_risk
 
 WALLET = "0x1234567890123456789012345678901234567890"
 
@@ -68,9 +69,11 @@ def test_maps_a_token_with_multiple_spenders() -> None:
     assert verified.approved_amount == "Unlimited"
     assert verified.spender_name == "Router"
     assert verified.raw["malicious_address"] is False
-    assert verified.raw["is_open_source"] is True
+    # Provider flags are passed through verbatim; `classify_risk`'s flag_state
+    # owns the coercion, so the tier is what this assertion should pin.
+    assert classify_risk(verified) is RiskTier.SAFE
     assert unverified.spender_address == "0xspender2"
-    assert unverified.raw["is_open_source"] is False
+    assert classify_risk(unverified) is RiskTier.WATCH
 
 
 @respx.mock
@@ -138,6 +141,44 @@ def test_malicious_token_flags_the_approval_even_with_a_clean_spender() -> None:
     approvals = GoPlusApprovalSource().fetch_approvals(WALLET, "1")
 
     assert approvals[0].raw["malicious_address"] is True
+
+
+@respx.mock
+def test_string_typed_provider_flags_do_not_cause_a_false_revocation() -> None:
+    # GoPlus returns 0/1 ints today (verified live). If it ever switches to
+    # "0"/"1" strings, bare truthiness would read every clean spender as
+    # flagged and auto-revoke it with a real transaction. End-to-end guard.
+    respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 1,
+                "message": "ok",
+                "result": [
+                    {
+                        "token_address": "0xtoken",
+                        "token_symbol": "USDC",
+                        "malicious_address": "0",
+                        "approved_list": [
+                            {
+                                "approved_contract": "0xclean",
+                                "approved_amount": "Unlimited",
+                                "address_info": {
+                                    "malicious_behavior": [],
+                                    "doubt_list": "0",
+                                    "is_open_source": "1",
+                                },
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+    )
+    approvals = GoPlusApprovalSource().fetch_approvals(WALLET, "1")
+
+    assert approvals[0].raw["malicious_address"] is False
+    assert classify_risk(approvals[0]) is RiskTier.SAFE
 
 
 @respx.mock

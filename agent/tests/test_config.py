@@ -2,7 +2,7 @@
 
 import pytest
 
-from aiagent.config import forbid_placeholders, require_env
+from aiagent.config import forbid_non_executing_modes, forbid_placeholders, require_env
 
 
 def test_require_env_passes_when_all_set(monkeypatch) -> None:
@@ -68,3 +68,43 @@ def test_worker_startup_check_skips_api_keys_with_fake_providers(monkeypatch) ->
     monkeypatch.setenv("AGENT_PROVIDERS", "live")
     with pytest.raises(SystemExit):
         _check_required_env()
+
+
+# -------------------------------------------- ADR-058: no fake execution in production
+
+
+def test_non_executing_modes_are_allowed_outside_production(monkeypatch) -> None:
+    """Fakes and dry runs are the point of the keyless demo/e2e — inert unless
+    APP_ENV says this is a real deployment."""
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.setenv("AGENT_PROVIDERS", "fake")
+    monkeypatch.setenv("KEEPERHUB_SIMULATE_ONLY", "true")
+    forbid_non_executing_modes("test-component")  # must not raise
+
+
+def test_fake_providers_are_refused_in_production(monkeypatch, caplog) -> None:
+    # FakeApprovalRevoker returns REVOKED with a fabricated tx hash. In
+    # production that tells a user a draining approval is gone when nothing
+    # was broadcast — refuse to boot instead.
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AGENT_PROVIDERS", "fake")
+    monkeypatch.delenv("KEEPERHUB_SIMULATE_ONLY", raising=False)
+    with pytest.raises(SystemExit):
+        forbid_non_executing_modes("test-component")
+    assert "AGENT_PROVIDERS=fake" in caplog.text
+
+
+def test_simulate_only_is_refused_in_production(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AGENT_PROVIDERS", "live")
+    monkeypatch.setenv("KEEPERHUB_SIMULATE_ONLY", "true")
+    with pytest.raises(SystemExit):
+        forbid_non_executing_modes("test-component")
+    assert "KEEPERHUB_SIMULATE_ONLY" in caplog.text
+
+
+def test_live_execution_is_allowed_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AGENT_PROVIDERS", "live")
+    monkeypatch.setenv("KEEPERHUB_SIMULATE_ONLY", "false")
+    forbid_non_executing_modes("test-component")  # must not raise

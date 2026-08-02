@@ -19,6 +19,16 @@ from aiagent.domain.ports import ApprovalRevoker, StepReporter
 logger = logging.getLogger(__name__)
 
 
+def _revoke_reason(outcome: ApprovalFinding) -> str:
+    """The journal line shown verbatim in the UI. A dry run says so plainly —
+    it must never read like a completed revocation (ADR-058)."""
+    if outcome.revocation_status is RevocationStatus.REVOKED:
+        return f"auto-revoked: tx {outcome.revocation_tx_hash}"
+    if outcome.revocation_status is RevocationStatus.SIMULATED:
+        return "simulated only (KEEPERHUB_SIMULATE_ONLY): approval is still live"
+    return "revocation attempt failed"
+
+
 def revoke_dangerous(
     job_id: str,
     findings: list[ApprovalFinding],
@@ -43,16 +53,11 @@ def revoke_dangerous(
             logger.error("revocation raised", extra={"job_id": job_id}, exc_info=True)
             outcome = replace(finding, revocation_status=RevocationStatus.FAILED)
         outcome_by_key[outcome.approval_key] = outcome
-        succeeded = outcome.revocation_status is RevocationStatus.REVOKED
         step = AgentStep(
             seq=steps[-1].seq + 1 if steps else 1,
             kind=AgentStepKind.REVOKE,
             detail=outcome.spender_address,
-            reason=(
-                f"auto-revoked: tx {outcome.revocation_tx_hash}"
-                if succeeded
-                else "revocation attempt failed"
-            ),
+            reason=_revoke_reason(outcome),
             new_hits=0,
         )
         steps.append(step)

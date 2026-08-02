@@ -123,10 +123,12 @@ def test_simulate_only_flag_is_forwarded() -> None:
 
 
 @respx.mock
-def test_a_successful_simulation_is_reported_as_revoked_with_no_tx_hash() -> None:
+def test_a_successful_simulation_is_never_reported_as_revoked() -> None:
     # Confirmed live against the real API (Sepolia, 2026-08-02): simulate=true
     # returns its result synchronously, with no executionId to poll at all —
     # a different response shape from a real execution, not just a stub of it.
+    # No transaction was broadcast, so the approval is STILL LIVE: reporting
+    # REVOKED here would tell a user a draining approval is gone when it is not.
     respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(
             200,
@@ -146,7 +148,8 @@ def test_a_successful_simulation_is_reported_as_revoked_with_no_tx_hash() -> Non
 
     result = revoker.revoke(a_finding())
 
-    assert result.revocation_status == RevocationStatus.REVOKED
+    assert result.revocation_status == RevocationStatus.SIMULATED
+    assert result.revocation_status != RevocationStatus.REVOKED
     assert result.revocation_tx_hash is None
 
 

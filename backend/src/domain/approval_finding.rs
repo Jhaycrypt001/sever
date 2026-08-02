@@ -18,12 +18,17 @@ pub enum RiskTier {
 
 /// What happened when a DANGEROUS-tier approval was sent for revocation
 /// (ADR-058).
+///
+/// `Revoked` means a transaction was broadcast and confirmed onchain, with
+/// `revocation_tx_hash` to prove it. A dry run is `Simulated`, never
+/// `Revoked` — the UI must never show a still-live approval as neutralized.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RevocationStatus {
     #[default]
     NotAttempted,
     Pending,
+    Simulated,
     Revoked,
     Failed,
 }

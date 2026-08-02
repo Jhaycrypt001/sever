@@ -1972,6 +1972,79 @@ hand-rolled orchestrators, the revoke span/metrics/audit-log line (in-memory
 OTel exporter/reader + `caplog`), and the full contract fixture set on both
 the Rust and Python sides.
 
+### ADR-059 — Pre-frontend security audit of the execution path (decided 2026-08-02, hardens ADR-058)
+
+**Context**: before building any UI on top of it, the whole server side was
+audited specifically as what it is — a tool that spends a stranger's money by
+broadcasting transactions on their behalf. The question asked of every code
+path was not "is this correct?" but "what does this do when it is wrong, and
+who pays for it?". Five issues came out of it; four were fixed, one is
+documented as accepted.
+
+1. **Provider flags were read with bare truthiness — fixed.** `classify_risk`
+   tested `raw.get("malicious_address")` directly. GoPlus returns `0`/`1`
+   **ints** on this endpoint (confirmed live against the real API during the
+   audit), so the code worked — by luck. `bool("0")` is `True` in Python, so
+   the day that provider returns `"0"` as a string, every clean spender reads
+   as flagged and gets **auto-revoked with a real transaction**. Replaced with
+   `flag_state()`, a strict tri-state read (`True`/`False`/`None` for
+   unrecognized), and the adapter now passes provider values through verbatim
+   instead of pre-coercing them with `bool()`, so the domain owns the one
+   coercion that matters.
+2. **Unknown signals now resolve per-flag, in the direction that is safe for
+   the action the tier authorizes — fixed.** These are deliberately not the
+   same direction. `malicious_address` unknown resolves to *not* dangerous:
+   DANGEROUS is the only tier that spends gas, so it demands a positive,
+   recognized signal — never revoke on a shrug. `is_open_source` unknown
+   resolves to *not* verified, i.e. WATCH, which is precisely that tier's
+   meaning ("unable to audit") and costs nothing but a line in the UI. The
+   previous default assumed unknown contracts were open-source and filed them
+   SAFE, which hid exactly the contracts least worth trusting.
+3. **The provider's trust list was fetched and ignored — fixed.**
+   `trust_list` was carried into `raw` but never read. A spender that the
+   provider both trusts and flags now degrades to WATCH instead of DANGEROUS:
+   contradictory signals are a question for a human, not grounds to broadcast.
+   Without this, one bad upstream flag on a router every wallet approves
+   (Uniswap, Permit2) would have auto-revoked live positions.
+4. **A dry run reported `revoked` — fixed, and it is why `Simulated` exists.**
+   With `KEEPERHUB_SIMULATE_ONLY=true` the adapter returned
+   `RevocationStatus.REVOKED` with no transaction hash, so the dashboard would
+   show a still-live draining approval as neutralized. `REVOKED` now means one
+   thing only — broadcast and confirmed, hash attached — and dry runs get their
+   own `SIMULATED` status end to end (Python enum, Rust enum, migration `0012`
+   widening the CHECK constraint, journal wording). Paired with a new
+   fail-fast guard, `forbid_non_executing_modes`: in `APP_ENV=production` the
+   worker refuses to boot under `AGENT_PROVIDERS=fake` (fabricated tx hashes)
+   or `KEEPERHUB_SIMULATE_ONLY=true`. A security tool that claims protection it
+   never applied is worse than no tool, so this fails loudly rather than
+   degrading quietly.
+5. **Unbounded agent→backend result payloads — accepted, not fixed.**
+   `explanation`, `malicious_behavior` and the pass-through `raw` JSONB have no
+   length caps, unlike the ADR-056 inputs. The endpoint is authenticated with
+   the internal token (ADR-005/006) and the only caller is our own worker, so
+   the realistic failure is accidental DB bloat from a hostile token name, not
+   an open door. Adding caps under deadline risks rejecting a legitimately
+   large wallet — a worse failure for this product than the bloat. Revisit if
+   the callback surface is ever exposed beyond the worker.
+
+Two further findings were investigated and deliberately left alone. A Celery
+retry can broadcast a **duplicate revocation**, because the idempotency key is
+minted fresh per attempt (required: KeeperHub caches failures against a reused
+key — #1840). Making the key deterministic would stop the duplicate but also
+make a transient failure permanently unretryable for that job; since
+`approve(spender, 0)` twice is a state no-op and gas is sponsored, the
+duplicate is the cheaper failure. And **one chain failing fails the whole
+multi-chain scan** — correct for a security tool, where "no dangerous
+approvals found" must never be reported for a chain that was never reached.
+
+Verified against a real database, not just fakes: migrations `0001`–`0012`
+applied to the compose Postgres and the full integration suite run against it,
+including a new test pinning that `simulated` survives the round trip and is
+never read back as `revoked`. That run also surfaced a latent bug the audit
+would otherwise have missed — three test address constants were 38 hex
+characters instead of 40, and had been silently skipping because the suite
+short-circuits without `DATABASE_URL`.
+
 ---
 
 ## 4. API contracts (summary)
