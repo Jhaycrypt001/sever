@@ -108,7 +108,13 @@ class GoPlusApprovalSource:
         response.raise_for_status()
         payload = response.json()
         if payload.get("code") != 1:
-            raise RuntimeError(f"GoPlus error: {payload.get('message', 'unknown error')}")
+            # `.get(key, default)` returns None when the key exists *and* is
+            # null, which GoPlus does on some error codes — that produced the
+            # useless "GoPlus error: None". `or` covers both missing and null,
+            # and the code is carried too: it is the only part an operator can
+            # look up in their docs.
+            message = payload.get("message") or "no message"
+            raise RuntimeError(f"GoPlus error (code {payload.get('code')}): {message}")
         tokens = payload.get("result") or []
         approvals: list[RawApproval] = []
         for token in tokens:

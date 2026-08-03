@@ -14,6 +14,8 @@
         "tags": [
           "auth"
         ],
+        "summary": "Checks the password and mails a sign-in code (ADR-063).",
+        "description": "Returns **202, not a session**: every sign-in takes two factors, and this\nendpoint owns only the first. `POST /api/auth/verify` finishes the job.",
         "operationId": "login",
         "requestBody": {
           "content": {
@@ -26,18 +28,28 @@
           "required": true
         },
         "responses": {
-          "200": {
-            "description": "Access token in body; refresh token set as an HttpOnly cookie (ADR-008)",
+          "202": {
+            "description": "Password accepted, sign-in code sent — finish at /api/auth/verify (ADR-063)",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AccessTokenResponse"
+                  "$ref": "#/components/schemas/VerificationSentResponse"
                 }
               }
             }
           },
           "401": {
             "description": "Invalid email or password",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The sign-in code could not be sent",
             "content": {
               "application/json": {
                 "schema": {
@@ -59,6 +71,109 @@
         "responses": {
           "204": {
             "description": "Refresh token revoked, cookie cleared"
+          }
+        }
+      }
+    },
+    "/api/auth/password/forgot": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Mails a password-reset code (ADR-063).",
+        "description": "Always 202. \"No account with that address\" is exactly the sentence that\nturns a forgot-password form into an account enumeration tool.",
+        "operationId": "forgot_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResendVerificationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "A reset code was sent if the address has an account",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationSentResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The reset email could not be sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/password/reset": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Sets a new password from a reset code and signs in (ADR-063).",
+        "operationId": "reset_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResetPasswordRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Password changed; every other session revoked; access token in body",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Wrong, stale, or expired reset code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "New password too short",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many incorrect attempts on this code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -99,6 +214,7 @@
         "tags": [
           "auth"
         ],
+        "summary": "Creates the account and mails it a verification code (ADR-062). No session\nis issued here — `POST /api/auth/verify` does that, once the address has\nanswered.",
         "operationId": "register",
         "requestBody": {
           "content": {
@@ -112,11 +228,11 @@
         },
         "responses": {
           "201": {
-            "description": "Account created",
+            "description": "Account created, verification code sent",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AccountResponse"
+                  "$ref": "#/components/schemas/RegistrationResponse"
                 }
               }
             }
@@ -133,6 +249,109 @@
           },
           "422": {
             "description": "Invalid credentials",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The verification email could not be sent",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/verify": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Accepts a verification code and signs the account in (ADR-062).",
+        "operationId": "verify_email",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VerifyEmailRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Address verified; access token in body, refresh token as an HttpOnly cookie",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccessTokenResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Wrong, expired, or already-used code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Too many incorrect attempts on this code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/verify/resend": {
+      "post": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "Issues a fresh code, superseding any outstanding one (ADR-062).",
+        "description": "Answers 202 whether or not the address is registered or already verified:\na distinguishable response would make this an account-enumeration oracle.",
+        "operationId": "resend_verification",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResendVerificationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "A code was sent if the address needed one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VerificationSentResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "The verification email could not be sent",
             "content": {
               "application/json": {
                 "schema": {
@@ -466,23 +685,6 @@
         "properties": {
           "access_token": {
             "type": "string"
-          }
-        }
-      },
-      "AccountResponse": {
-        "type": "object",
-        "description": "`{ \"id\": \"…\", \"email\": \"…\" }` — a created account.",
-        "required": [
-          "id",
-          "email"
-        ],
-        "properties": {
-          "email": {
-            "type": "string"
-          },
-          "id": {
-            "type": "string",
-            "format": "uuid"
           }
         }
       },
@@ -859,6 +1061,65 @@
           }
         }
       },
+      "RegistrationResponse": {
+        "type": "object",
+        "description": "A created account (ADR-062). `verification_required` is always true: the\naccount exists but cannot be signed into until the emailed code is entered,\nand the client uses this to move straight to the code screen.\n\n`verification_code` is present **only** in a development configuration with\nno email provider, so the console can be driven without a mailbox. It is\nabsent in production, where `AppConfig` refuses to expose it.",
+        "required": [
+          "id",
+          "email",
+          "verification_required"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "verification_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "verification_required": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ResendVerificationRequest": {
+        "type": "object",
+        "description": "`{ \"email\": \"…\" }` — \"send me another code\", and \"I forgot my password\".",
+        "required": [
+          "email"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          }
+        }
+      },
+      "ResetPasswordRequest": {
+        "type": "object",
+        "description": "`{ \"email\": \"…\", \"code\": \"123456\", \"password\": \"…\" }` — account recovery.",
+        "required": [
+          "email",
+          "code",
+          "password"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "password": {
+            "type": "string"
+          }
+        }
+      },
       "RevocationStatus": {
         "type": "string",
         "description": "What happened when a DANGEROUS-tier approval was sent for revocation\n(ADR-058).\n\n`Revoked` means a transaction was broadcast and confirmed onchain, with\n`revocation_tx_hash` to prove it. A dry run is `Simulated`, never\n`Revoked` — the UI must never show a still-live approval as neutralized.",
@@ -878,6 +1139,34 @@
           "watch",
           "dangerous"
         ]
+      },
+      "VerificationSentResponse": {
+        "type": "object",
+        "description": "The answer to \"send me a code\".\n\nCarries no claim that anything was sent — it cannot, because the request is\nanswered identically for an unregistered address and an already-verified\none, and saying `sent: true` there would be a field that lies. The client's\nwording is conditional to match (\"if that address needs a code…\").",
+        "properties": {
+          "verification_code": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "VerifyEmailRequest": {
+        "type": "object",
+        "description": "`{ \"email\": \"…\", \"code\": \"123456\" }` — answering a verification code.",
+        "required": [
+          "email",
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          }
+        }
       }
     },
     "securitySchemes": {

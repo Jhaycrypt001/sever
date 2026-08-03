@@ -188,6 +188,22 @@ docker compose --profile full down          # teardown (remember to revert .env)
 `AGENT_PROVIDERS=fake` also works for keyless local development (the worker
 starts without ANTHROPIC/TAVILY keys and returns deterministic results).
 
+Always pass `--build` after adding a migration. The migrations are embedded in
+the backend binary at compile time (`sqlx::migrate!`), so a stale image carries
+a stale set — and if the database has since been migrated further (by
+`cargo test` against the same `DATABASE_URL`, for instance), the backend
+refuses to start with:
+
+```
+failed to run migrations: migration 14 was previously applied but is missing
+in the resolved migrations
+```
+
+That refusal is correct — a binary that does not know a schema must not write
+to it — but the symptom is indirect: `docker compose up -d` still reports the
+container as *Started*, it crash-loops, and the only visible effect is a 500
+from the API. `docker compose logs backend` says exactly what happened.
+
 ### Local LLM (Ollama — ADR-041)
 
 Run the live agent against a model on your own machine instead of the
@@ -250,10 +266,16 @@ real Chromium:
 ```sh
 cd web
 npx playwright install chromium             # one-time browser download
-npm run test:e2e                            # register -> scan -> findings -> revocation
+npm run test:e2e                            # register -> verify -> scan -> findings -> revocation
 E2E_BASE_URL=http://other-host:8080 npm run test:e2e   # any base URL
 npx playwright show-report                  # inspect a failed run
 ```
+
+The suite registers accounts, and registration now requires an e-mailed code
+(ADR-062). Leave `RESEND_API_KEY` unset when booting the stack: the backend
+then returns the code in its own response and the console pre-fills the box, so
+no mailbox is involved. With a real key set, these tests cannot pass — the code
+goes to an inbox instead.
 
 ### Worker console (Flower — ADR-040, opt-in)
 
@@ -339,21 +361,37 @@ With the backend running on :8000:
 # Health
 curl http://localhost:8000/healthz
 
-# Register
-curl -X POST http://localhost:8000/api/auth/register \
+# Register -> the account exists but cannot sign in yet (ADR-062).
+# Without RESEND_API_KEY the backend returns the code instead of mailing it;
+# with a provider configured, read it from the inbox instead.
+CODE=$(curl -s -X POST http://localhost:8000/api/auth/register \
+  -H 'content-type: application/json' \
+  -d '{"email":"me@example.com","password":"password123"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["verification_code"] or "")')
+
+# Answer the code -> this is the sign-in
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/verify \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"me@example.com\",\"code\":\"$CODE\"}" \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+# Every later sign-in takes the password AND a code (ADR-063): this answers
+# 202 with a fresh code, which /api/auth/verify then exchanges for a session.
+curl -s -X POST http://localhost:8000/api/auth/login \
   -H 'content-type: application/json' \
   -d '{"email":"me@example.com","password":"password123"}'
 
-# Login -> capture the token
-TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login \
+# Forgot it? Recovery runs on the same mechanism, under its own code purpose.
+curl -s -X POST http://localhost:8000/api/auth/password/forgot \
+  -H 'content-type: application/json' -d '{"email":"me@example.com"}'
+curl -s -X POST http://localhost:8000/api/auth/password/reset \
   -H 'content-type: application/json' \
-  -d '{"email":"me@example.com","password":"password123"}' \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+  -d '{"email":"me@example.com","code":"123456","password":"a-new-password"}'
 
-# Launch a search
+# Launch a scan (ADR-058)
 curl -X POST http://localhost:8000/api/searches \
   -H "authorization: Bearer $TOKEN" -H 'content-type: application/json' \
-  -d '{"keyword":"rust hexagonal architecture"}'
+  -d '{"wallet_address":"0x1234567890123456789012345678901234567890"}'
 
 # List searches / read one
 curl -H "authorization: Bearer $TOKEN" http://localhost:8000/api/searches

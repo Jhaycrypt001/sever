@@ -177,7 +177,22 @@ def _build_graph(
 
     def do_scan(state: GraphState) -> dict[str, Any]:
         chain_id, reason = state["next"]["chain_id"], state["next"]["reason"]
-        found = source.fetch_approvals(state["wallet_address"], chain_id)
+        try:
+            found = source.fetch_approvals(state["wallet_address"], chain_id)
+        except Exception as exc:  # noqa: BLE001 - one chain must not sink the run
+            # ADR-064: record the gap and keep going. The graph advances with
+            # no new approvals, and the `degraded` step keeps the run from
+            # reading as a clean sweep of a chain nobody reached.
+            logger.warning("chain %s could not be scanned: %s", chain_id, exc)
+            step = AgentStep(
+                seq=len(state["steps"]) + 1,
+                kind=AgentStepKind.DEGRADED,
+                detail=chain_id,
+                reason=f"chain not scanned: {exc}",
+                new_hits=0,
+            )
+            _report(step)
+            return {"steps": state["steps"] + [_step_to_dict(step)]}
         seen = set(state["collected"])
         new = [
             a
@@ -361,6 +376,24 @@ def _deliver(
 ) -> list[ApprovalFinding]:
     """Shared tail with the loop: assess, sort, auto-revoke, flag the
     recurring delta, and deliver (ADR-033/058)."""
+    # ADR-064: if every chain the graph attempted was unreachable, nothing was
+    # inspected. Delivering an empty result set would render as "no dangerous
+    # approvals" — a clean bill of health for a wallet nobody looked at.
+    kinds = [step.get("kind") for step in state["steps"]]
+    if AgentStepKind.DEGRADED in kinds and AgentStepKind.SCAN not in kinds:
+        # The reason carries the provider's own error; without it the job's
+        # error field says only "no chain could be scanned", which tells an
+        # operator nothing they can act on.
+        degraded = [
+            f"{step.get('detail')}: {step.get('reason')}"
+            for step in state["steps"]
+            if step.get("kind") == AgentStepKind.DEGRADED
+        ]
+        raise RuntimeError(
+            f"no chain could be scanned ({'; '.join(degraded)}) — "
+            "refusing to report a wallet as clean"
+        )
+
     approvals = [_approval_from_dict(a) for a in state["approvals"]]
     findings = sort_by_risk(resolve_approvals(approvals, threat_intel))
 
@@ -374,7 +407,9 @@ def _deliver(
     steps = [_step_from_dict(s) for s in state["steps"]]
 
     if revoker is not None:
-        findings = revoke_dangerous(job_id, findings, revoker, reporter, steps)
+        findings = revoke_dangerous(
+            job_id, str(state["wallet_address"]), findings, revoker, reporter, steps
+        )
 
     if seen_keys is not None:
         findings = flag_new(findings, seen_keys)

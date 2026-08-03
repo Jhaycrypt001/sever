@@ -220,7 +220,9 @@ stored hashed in the database to allow revocation). Passwords hashed with **argo
   refresh cookie enables **silent session restore** on page reload (router
   guard) and a refresh-and-retry on 401 (`withAuth` in the auth store).
 - Endpoints: `POST /api/auth/register`, `/login`, `/refresh`, `/logout`
-  (all implemented, 2026-07-07).
+  (all implemented, 2026-07-07), plus `/verify`, `/verify/resend` (ADR-062)
+  and `/password/forgot`, `/password/reset` (ADR-063). Neither registration
+  nor login issues a session — answering the emailed code does.
 
 Full sequence diagram (sign-up → login → silent refresh → sign-out):
 [`docs/diagrams/auth-refresh-flow.puml`](diagrams/auth-refresh-flow.puml)
@@ -2219,14 +2221,252 @@ discovered.
 
 ---
 
+### ADR-062 — E-mail verification at sign-up (decided 2026-08-03, extends ADR-008/020/057)
+
+**Context**: registration took an address and a password, hashed the password
+with argon2 and issued a session on the spot (ADR-008). Nothing ever checked
+that the address existed or belonged to the person typing it. Two consequences.
+The digest webhook and every future recovery path point at an address that was
+never confirmed, so a typo silently sends someone else's scan results to a
+stranger — or nowhere. And an account costs nothing to create in bulk, which
+matters for a product whose free tier dispatches paid worker runs (ADR-017).
+
+**Decision**: an account exists the moment it is registered, but it cannot be
+signed into until a six-digit code mailed to its address is answered.
+
+1. **`email_verified_at` on `users` is the gate.** `NULL` means no session may
+   be issued. `LoginUser` returns a distinct `EmailNotVerified` — checked
+   *after* the password, never before, so login cannot be used to discover
+   which addresses are registered. The HTTP layer maps it to `403` with
+   `code: "email_not_verified"`, and the console opens the code screen instead
+   of claiming the password was wrong.
+2. **Codes are stored hashed, like refresh tokens (ADR-008).** Six digits carry
+   almost no entropy, so three other things carry the security: a 10-minute
+   TTL, a hard cap of five attempts per code (past it the code is dead even if
+   guessed correctly), and a per-account throttle on `/api/auth/verify`. That
+   throttle is a **separate budget** from the login throttle of ADR-057 on its
+   own key namespace — they guess at different secrets, and sharing one meant
+   fumbling a code spent the attempts needed to sign in afterwards.
+3. **One live code per account.** `EmailVerificationRepository::insert`
+   supersedes any outstanding code in the same transaction. The alternative —
+   resolving "the current code" by comparing timestamps — is ambiguous for two
+   codes issued inside the same microsecond (`now_utc` truncates there), and
+   resend is exactly the operation that would hit it.
+4. **New port `EmailSender`, two adapters.** `ResendEmailSender` posts to
+   Resend's HTTP API — chosen over SMTP only because `reqwest` is already a
+   dependency and an SMTP client would add a TLS stack and a MIME builder for
+   one six-digit message. `DevEmailSender` logs the code and records it.
+   Another provider, or `lettre` over SMTP, is one more implementation.
+5. **The development affordance is forced off in production**, the same rule
+   ADR-059 applies to simulated revocations. With no `RESEND_API_KEY` the API
+   returns the code in its own response so the console works without a mailbox;
+   `AppConfig` computes `expose_verification_codes` as
+   `resend_api_key.is_none() && !is_production`, and the gate is applied in one
+   place (`AppState::exposed_code`) so no handler can leak one by accident.
+   `RESEND_API_KEY` and `EMAIL_FROM` join `REQUIRED_IN_PRODUCTION` (ADR-020):
+   without a mailer, registration creates accounts nobody can ever sign into,
+   and refusing at boot beats discovering that from a user.
+6. **Answering a code is a full sign-in.** It has to be — the alternative is
+   asking for the password again immediately after proving the address. Both
+   doors therefore go through one `SessionIssuer`, so token lifetimes and
+   rotation families (ADR-056) cannot drift between them.
+7. **Resend and register-for-an-existing-address reveal nothing.** `POST
+   /api/auth/verify/resend` answers `202` identically for an unregistered
+   address, an already-verified one, and a real send. Its response carries no
+   `sent` field, because saying `sent: true` where nothing was sent would be a
+   field that lies; the console's wording is conditional to match.
+8. **Migration 0013 grandfathers existing accounts** (`UPDATE users SET
+   email_verified_at = created_at`). Locking out people who registered before
+   the rule existed would be a data-loss event for someone who did nothing
+   wrong.
+
+**Consequences**: registration is a two-step flow, and the browser suite pays
+for it — every `register()` in `web/e2e/console.spec.ts` now answers a code.
+The compose stack has no mail provider, so the code arrives in the register
+response and the console pre-fills it, with a visible notice saying why. A
+deployment that sets `APP_ENV=production` must now hold a verified Resend
+sending domain before it will boot.
+
+**Not done**: no per-login 2FA. This verifies that an address is reachable,
+once. Requiring a code on every sign-in is a different feature with a different
+cost, and passkeys (WebAuthn) would be the better answer to that question.
+*(Revisited the next day by ADR-063, which does exactly that.)*
+
+---
+
+### ADR-063 — Two-factor sign-in and account recovery (decided 2026-08-03, revisits ADR-062)
+
+**Context**: ADR-062 verified an address once, at sign-up, and then let the
+password alone open every later session. Two gaps followed. A leaked password
+was still a complete account takeover — for a product whose whole pitch is
+"your approvals are someone else's problem once they are in", that is the wrong
+default. And there was no recovery at all: forgetting the password meant losing
+every watched wallet, with no path back that did not involve a database.
+
+**Decision**: the emailed code becomes the second factor of *every* sign-in,
+and the same mechanism, under a separate purpose, recovers a lost password.
+
+1. **`POST /api/auth/login` answers 202, not 200.** It checks the password and
+   mails a code; it issues no session. `LoginUser` no longer holds a
+   `SessionIssuer` at all, so "a password cannot sign you in" is a
+   compile-time property rather than a rule someone has to remember.
+   `ConfirmEmailVerification` is the single place a session is minted.
+2. **`CodePurpose` (`verify` | `reset`) is stored on every code**, and every
+   lookup filters on it (migration 0014). Without it a code handed out for a
+   sign-in would also authorise setting a new password. Supersession is
+   per-purpose too: asking to reset must not kill a sign-in code in flight.
+3. **`verify/resend` stays restricted to unverified accounts.** This is the one
+   passwordless code issuer, and the restriction is load-bearing: if it served
+   verified accounts, mailbox access alone would be enough to sign in and the
+   password would stop mattering. Resending a *sign-in* code therefore means
+   re-submitting the password, which the console does from state.
+4. **A superseded code says so, and does not spend an attempt.** Previously the
+   older of two emails read as "invalid", sending people hunting for a typo
+   that was not there — and five such submissions burned the live code's whole
+   attempt budget, locking someone out of an account they could otherwise
+   open. `find_by_hash` recognises a code that was genuinely issued here, so
+   `Superseded` is distinguishable from a guess. It reveals nothing: naming a
+   past code is exactly as hard as naming the current one, and grants nothing.
+5. **Recovery ends signed in.** By the last step the person has proved both of
+   the things an ordinary sign-in asks for — possession of the mailbox (the
+   code) and knowledge of the password (the one they just chose). Sending a
+   second email to log in afterwards would be ceremony, not security.
+6. **A reset revokes every existing session** (`delete_for_user`). The common
+   reason to reach for this form is "someone else may be in my account"; a
+   reset that leaves the intruder's refresh cookie alive fails at the one job
+   it was reached for.
+7. **The password length rule is checked before the code is looked up**, so a
+   too-short password never burns the code needed for the retry.
+
+**Consequences**: signing in is two steps, always. That is a real cost —
+demoing the console now means fetching a code — and it is the reason the
+development configuration returns codes in the API response (ADR-062 §5)
+rather than being a convenience. The browser suite and `scripts/e2e-smoke.sh`
+both answer a code per sign-in.
+
+**Found while building this**: `delete_expired` on the code repository is a
+*global* sweep, and the PostgreSQL integration tests run in parallel against
+one database. A test that purged with a future cutoff deleted live codes
+belonging to whatever else was running, failing an unrelated test. Fixed by
+issuing an already-expired code (negative TTL) and sweeping at `now`.
+
+---
+
+### ADR-064 — One chain's outage does not sink the scan (decided 2026-08-03, extends ADR-030/058/059)
+
+**Context**: `fetch_approvals` was called in a bare loop over the configured
+chains, in all three orchestration paths (`run_scan`, the hand-rolled loop, and
+the LangGraph graph). A single provider error — a GoPlus rate limit on Base,
+say — raised straight out of the loop, so the job failed *and* threw away every
+finding already collected from the chains that had answered. A wallet with a
+live drainer approval on Ethereum reported nothing at all because Base was busy.
+
+The same investigation turned up `"GoPlus error: None"` in the logs:
+`payload.get("message", "unknown error")` returns `None` when the key exists
+and is null, which is what GoPlus sends on several error codes. The default
+only applies to a *missing* key.
+
+**Decision**: a chain that cannot be scanned is a recorded gap, not a crash —
+unless it is the only chain.
+
+1. **New `AgentStepKind.DEGRADED`.** A failed chain becomes a journal step
+   carrying the chain id and the provider's error. `kind` was already an open
+   string on the wire (Rust `String`, zod `z.string()`, no SQL CHECK), so this
+   needed no migration and no contract change — the console's existing
+   "unknown kinds render neutrally" rule already handled it safely.
+2. **All three paths continue to the next chain.** Workflow mode gained an
+   optional `StepReporter` for exactly this; it is the only kind of step a
+   workflow run ever writes, which is the point — a journal entry there means
+   something went wrong, and an empty journal means it did not.
+3. **If every attempted chain fails, the job fails.** This is the ADR-059 rule
+   in a new costume: delivering an empty result set renders as *no dangerous
+   approvals found*, which is a clean bill of health for a wallet nobody
+   managed to look at. Partial coverage is reportable; zero coverage is not.
+4. **The console says so above the fold.** A `degraded-notice` banner names the
+   unreachable chains next to the tier counts, because the dangerous way to
+   read that page is "0 dangerous" — a number that means nothing for a chain
+   that was never queried. It is derived from the journal steps rather than a
+   second field, so the two cannot drift.
+5. **Failure messages carry their cause.** `no chain could be scanned` alone is
+   unactionable in a log; each entry is `{chain}: {provider error}`. A single
+   configured chain failing keeps the raw provider error as the job's error,
+   unchanged from before.
+
+**Consequences**: a partial scan is now a *success* with a visible gap, where
+it used to be a total failure. That is the right trade for a monitoring
+product — the Ethereum drainer gets reported while Base is down — but it does
+mean "completed" no longer implies "complete", and the banner is what carries
+that distinction. Two pre-existing tests asserted the old fail-fast timing and
+were updated rather than deleted: the invariant they protect (nothing is
+delivered when nothing was scanned) still holds, it just triggers later.
+
+---
+
+### ADR-065 — A revocation is refused unless the scanned wallet is the delegated one (decided 2026-08-04, extends ADR-058/059)
+
+**Context**: found while switching the stack to live mainnet, before the first
+real transaction. `POST /api/execute/contract-call` carries **no wallet field** —
+KeeperHub executes as whatever wallet the API key is bound to, readable at
+`GET /api/user` (`walletAddress`). The console, meanwhile, accepts *any* valid
+EVM address as a scan target, and nothing anywhere compared the two.
+
+So for any scan of an address other than the operator's own, agent mode would:
+send a real `approve(spender, 0)` from the **operator's** wallet, burn real gas,
+clear an allowance that was never granted (a no-op), get back a genuine
+transaction hash, and render the finding as **`Revoked · tx 0x…`**. The scanned
+wallet's draining approval would still be live, with a blockchain receipt
+presented as proof it was gone.
+
+That is the failure ADR-059 exists to prevent, made worse: the earlier version
+was a dry run mislabelled as real, this one comes with a real transaction to
+point at.
+
+**Decision**: `ApprovalRevoker.revoke` takes the scanned `wallet_address`, and
+an implementation must refuse unless it can execute *as* that wallet.
+
+1. **The guard lives in the adapter**, not the use case. The adapter is the
+   only thing that knows its execution identity; the port contract states the
+   obligation ("revoke this finding **for this wallet**") and the KeeperHub
+   adapter enforces it by comparing against `GET /api/user`, cached for the
+   life of the key. Case-insensitive, because EIP-55 checksum casing is
+   routine and a case-sensitive compare would refuse the operator's own wallet.
+2. **Refusal is `NOT_ATTEMPTED`, never `FAILED`.** Nothing was tried, and no
+   network call is made — the guard runs before the POST. `FAILED` would imply
+   an attempt that went wrong, which invites a retry that can never succeed.
+3. **Unknown is not permission.** If `GET /api/user` cannot be read, the guard
+   cannot be evaluated and no revocation proceeds.
+4. **The journal names the reason**: *"not attempted: this wallet is not
+   delegated to KeeperHub, so the approval can only be revoked by its own
+   owner."* On the most dangerous row in the table, an unexplained blank is
+   nearly as bad as a wrong label.
+
+**Consequences**: scanning is still open to any address — that is the product's
+front door and it is read-only. Only *execution* is restricted, and only to the
+wallet that granted the approvals in the first place, which is the only wallet
+whose approvals `approve(spender, 0)` can possibly clear. A future multi-wallet
+KeeperHub (several delegated wallets per key) turns the equality check into a
+membership check; nothing else moves.
+
+**Why this was not caught earlier**: every prior end-to-end run used
+`AGENT_PROVIDERS=fake` or a Sepolia dry run against the operator's own wallet,
+where scanned and delegated wallet coincide. The bug is invisible until someone
+scans an address they do not control — which, for a public product, is the
+first thing a stranger does.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)
 
 | Method | Route | Description |
 |---|---|---|
-| POST | `/api/auth/register` | Account creation |
-| POST | `/api/auth/login` | Login → access token (body) + refresh cookie |
+| POST | `/api/auth/register` | Account creation → mails a verification code; issues **no** session (ADR-062) |
+| POST | `/api/auth/verify` | `{email, code}` → access token + refresh cookie. The only route to a session (ADR-062/063) |
+| POST | `/api/auth/verify/resend` | `{email}` → 202, identical whether or not the address needs a code; unverified accounts only (ADR-062/063) |
+| POST | `/api/auth/login` | Password check → **202** and a mailed code, never a session (ADR-063) |
+| POST | `/api/auth/password/forgot` | `{email}` → 202, identical whether or not the address has an account (ADR-063) |
+| POST | `/api/auth/password/reset` | `{email, code, password}` → new password, every other session revoked, signed in (ADR-063) |
 | POST | `/api/auth/refresh` | Rotates the refresh cookie → new access token |
 | POST | `/api/auth/logout` | Revokes the refresh token, clears the cookie |
 | POST | `/api/searches` | Launches a scan `{wallet_address, mode?}` → `{job_id}` (`mode`: `workflow` default, or `agent` — ADR-030) |

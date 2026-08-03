@@ -70,8 +70,49 @@ class KeeperHubApprovalRevoker:
         self._poll_interval = poll_interval_seconds
         self._poll_timeout = poll_timeout_seconds
         self._headers = {"Authorization": f"Bearer {api_key}"}
+        # Resolved once, on first use (ADR-065).
+        self._wallet: str | None = None
+        self._wallet_checked = False
 
-    def revoke(self, finding: ApprovalFinding) -> ApprovalFinding:
+    def delegated_wallet(self) -> str | None:
+        """The wallet this API key executes as, from `GET /api/user`.
+
+        Cached: it cannot change for the life of a key, and it is consulted
+        before every revocation. `None` means KeeperHub would not tell us —
+        in which case no revocation may proceed, because the guard below
+        cannot be evaluated (ADR-065).
+        """
+        if self._wallet_checked:
+            return self._wallet
+        self._wallet_checked = True
+        try:
+            response = self._client.get(f"{self._api_url}/api/user", headers=self._headers)
+            response.raise_for_status()
+            wallet = response.json().get("walletAddress")
+            self._wallet = str(wallet).lower() if wallet else None
+        except Exception:  # noqa: BLE001 - unreachable is "unknown", not "allowed"
+            logger.error("could not read the KeeperHub delegated wallet", exc_info=True)
+            self._wallet = None
+        return self._wallet
+
+    def revoke(self, finding: ApprovalFinding, wallet_address: str) -> ApprovalFinding:
+        # ADR-065: `approve(spender, 0)` clears the allowance of whoever sends
+        # it. Executed for a wallet this key cannot act as, it is a real,
+        # gas-burning no-op that still returns a transaction hash — and that
+        # hash would be rendered as proof the approval is gone. Refuse before
+        # touching the network.
+        delegated = self.delegated_wallet()
+        if delegated is None or delegated != wallet_address.lower():
+            logger.error(
+                "refusing to revoke: the scanned wallet is not the delegated wallet",
+                extra={
+                    "scanned_wallet": wallet_address,
+                    "delegated_wallet": delegated,
+                    "spender_address": finding.spender_address,
+                },
+            )
+            return replace(finding, revocation_status=RevocationStatus.NOT_ATTEMPTED)
+
         # Counted as a generic external call for the spend-cap accounting
         # (ADR-048); real gas cost is not an LLM/API spend and is tracked
         # separately by the audit trail (tx hash, gas used), not this meter.

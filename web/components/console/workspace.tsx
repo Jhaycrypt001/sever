@@ -509,6 +509,19 @@ function ScanDetail({
     }
   }, [detail])
 
+  /**
+   * Chains the run could not reach (ADR-064). Read off the journal rather than
+   * a dedicated field: `degraded` steps are already the record of what was
+   * skipped, and a second source of truth for the same fact would be one more
+   * thing that can drift.
+   */
+  const unscannedChains = useMemo(() => {
+    const chains = (detail?.steps ?? [])
+      .filter((s) => s.kind === 'degraded' && s.detail)
+      .map((s) => s.detail)
+    return [...new Set(chains)]
+  }, [detail])
+
   if (!selectedId) {
     return (
       <section className="rounded-lg border border-white/[0.08] bg-white/[0.015] px-6 py-20 text-center">
@@ -561,6 +574,23 @@ function ScanDetail({
           >
             Report-only run · nothing was revoked · every allowance below is
             still live
+          </p>
+        ) : null}
+
+        {/*
+          Partial coverage (ADR-064). Stated at the top of the run, not left in
+          the journal, because the dangerous reading of this page is "0
+          dangerous approvals" — and that number means nothing for a chain
+          nobody could reach. Someone who never opens the journal still has to
+          learn the sweep was incomplete.
+        */}
+        {unscannedChains.length > 0 ? (
+          <p
+            data-testid="degraded-notice"
+            className="rounded border border-red-500/25 bg-red-500/[0.08] px-3 py-2 font-mono text-[10px] uppercase tracking-[0.08em] text-red-300"
+          >
+            Incomplete scan · {unscannedChains.join(', ')} could not be reached ·
+            counts below do not cover {unscannedChains.length > 1 ? 'those chains' : 'that chain'}
           </p>
         ) : null}
 

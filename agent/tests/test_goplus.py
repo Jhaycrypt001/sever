@@ -201,6 +201,34 @@ def test_error_response_raises_instead_of_returning_empty() -> None:
 
 
 @respx.mock
+def test_a_null_message_does_not_become_the_string_none() -> None:
+    # ADR-064: GoPlus returns `"message": null` on some error codes, and
+    # `.get(key, default)` returns None when the key *exists* and is null —
+    # which produced the useless "GoPlus error: None" in production logs.
+    respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
+        return_value=httpx.Response(200, json={"code": 4012, "message": None})
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        GoPlusApprovalSource().fetch_approvals(WALLET, "1")
+
+    assert "None" not in str(excinfo.value)
+    # The code is the only part an operator can look up in GoPlus's docs.
+    assert "4012" in str(excinfo.value)
+
+
+@respx.mock
+def test_a_missing_message_key_is_handled_too() -> None:
+    respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
+        return_value=httpx.Response(200, json={"code": 4012})
+    )
+    with pytest.raises(RuntimeError) as excinfo:
+        GoPlusApprovalSource().fetch_approvals(WALLET, "1")
+
+    assert "None" not in str(excinfo.value)
+    assert "4012" in str(excinfo.value)
+
+
+@respx.mock
 def test_api_key_is_sent_when_configured() -> None:
     route = respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
         return_value=httpx.Response(200, json={"code": 1, "message": "ok", "result": []})

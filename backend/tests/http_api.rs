@@ -8,11 +8,14 @@ use axum::http::{Request, StatusCode};
 use axum::Router;
 use backend::adapters::auth::{Argon2PasswordHasher, JwtTokenService};
 use backend::adapters::dispatch::NoopJobDispatcher;
+use backend::adapters::email::DevEmailSender;
 use backend::adapters::http::rate_limit::Limiter;
-use backend::adapters::http::{router_with_limits, AppState, RateLimitConfig};
+use backend::adapters::http::{
+    router_with_limits, AppState, EmailVerificationSetup, RateLimitConfig,
+};
 use backend::adapters::persistence::in_memory::{
-    InMemoryJobRepository, InMemoryRecurringSearchRepository, InMemoryRefreshTokenRepository,
-    InMemorySecurityAudit, InMemoryUserRepository,
+    InMemoryEmailVerificationRepository, InMemoryJobRepository, InMemoryRecurringSearchRepository,
+    InMemoryRefreshTokenRepository, InMemorySecurityAudit, InMemoryUserRepository,
 };
 use backend::domain::ports::SecurityAudit;
 use http_body_util::BodyExt;
@@ -49,12 +52,81 @@ fn app_with_audit(
         Arc::new(Argon2PasswordHasher),
         Arc::new(JwtTokenService::new("test-secret", 15)),
         audit.clone(),
+        // ADR-062: the tests run the development mail configuration, so the
+        // code comes back in the response instead of needing a mailbox.
+        EmailVerificationSetup {
+            verifications: Arc::new(InMemoryEmailVerificationRepository::default()),
+            mailer: Arc::new(DevEmailSender::default()),
+            ttl_minutes: 10,
+            expose_codes: true,
+            // Its own budget, so a test that throttles login still gets to
+            // verify an account first.
+            throttle: Limiter::per_minute(limits.login_per_minute, "verify", None),
+        },
         login_throttle,
         INTERNAL_TOKEN.into(),
         daily_quota,
         30,
     );
     (router_with_limits(state, limits), audit)
+}
+
+/// Answers a code and returns the access token of the session it opened.
+async fn answer_code(app: &Router, email: &str, code: &str) -> String {
+    let (status, body) = send(
+        app,
+        post_json(
+            "/api/auth/verify",
+            json!({"email": email, "code": code}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "verify: {body}");
+    body["access_token"].as_str().unwrap().to_string()
+}
+
+/// Registers an account and answers its code (ADR-062), leaving it signed in.
+/// Returns the access token.
+async fn register_verified(app: &Router, email: &str, password: &str) -> String {
+    let (status, body) = send(
+        app,
+        post_json(
+            "/api/auth/register",
+            json!({"email": email, "password": password}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "register: {body}");
+    assert_eq!(body["verification_required"], json!(true));
+    let code = body["verification_code"]
+        .as_str()
+        .expect("the development configuration returns the code")
+        .to_string();
+
+    answer_code(app, email, &code).await
+}
+
+/// The full two-factor sign-in of ADR-063: password, then the emailed code.
+async fn sign_in(app: &Router, email: &str, password: &str) -> String {
+    let (status, body) = send(
+        app,
+        post_json(
+            "/api/auth/login",
+            json!({"email": email, "password": password}),
+            &[],
+        ),
+    )
+    .await;
+    // 202, not 200: the password alone does not open a session.
+    assert_eq!(status, StatusCode::ACCEPTED, "login: {body}");
+    let code = body["verification_code"]
+        .as_str()
+        .expect("the development configuration returns the code")
+        .to_string();
+
+    answer_code(app, email, &code).await
 }
 
 /// Extracts the `refresh_token` cookie value from a `set-cookie` response header.
@@ -111,30 +183,13 @@ fn get(uri: &str, extra_headers: &[(&str, &str)]) -> Request<Body> {
 async fn full_search_lifecycle() {
     let app = app();
 
-    // Register
-    let (status, body) = send(
-        &app,
-        post_json(
-            "/api/auth/register",
-            json!({"email": "alice@example.com", "password": "s3cret-password"}),
-            &[],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::CREATED, "register: {body}");
+    // Register, answer the emailed code (ADR-062), and land signed in
+    let token = register_verified(&app, "alice@example.com", "s3cret-password").await;
 
-    // Login
-    let (status, body) = send(
-        &app,
-        post_json(
-            "/api/auth/login",
-            json!({"email": "alice@example.com", "password": "s3cret-password"}),
-            &[],
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK, "login: {body}");
-    let token = body["access_token"].as_str().unwrap().to_string();
+    // Sign in again: password, then a second code (ADR-063).
+    assert!(!sign_in(&app, "alice@example.com", "s3cret-password")
+        .await
+        .is_empty());
     let auth = format!("Bearer {token}");
 
     // Launch a search
@@ -223,8 +278,9 @@ async fn searches_require_authentication() {
 async fn refresh_token_rotation_and_logout() {
     let app = app();
 
-    // Register + login: the response carries the refresh cookie.
-    send(
+    // Register + verify: answering the code is what sets the refresh cookie
+    // (ADR-063 — login itself only sends the code).
+    let (_, registered) = send(
         &app,
         post_json(
             "/api/auth/register",
@@ -233,11 +289,12 @@ async fn refresh_token_rotation_and_logout() {
         ),
     )
     .await;
+    let code = registered["verification_code"].as_str().unwrap();
     let response = app
         .clone()
         .oneshot(post_json(
-            "/api/auth/login",
-            json!({"email": "carol@example.com", "password": "s3cret-password"}),
+            "/api/auth/verify",
+            json!({"email": "carol@example.com", "code": code}),
             &[],
         ))
         .await
@@ -343,25 +400,10 @@ async fn auth_endpoints_are_rate_limited_per_ip() {
 async fn search_creation_is_capped_by_the_daily_quota() {
     let app = app_with(RateLimitConfig::default(), 1);
 
-    let (_, _) = send(
-        &app,
-        post_json(
-            "/api/auth/register",
-            json!({"email": "bob@example.com", "password": "s3cret-password"}),
-            &[],
-        ),
-    )
-    .await;
-    let (_, body) = send(
-        &app,
-        post_json(
-            "/api/auth/login",
-            json!({"email": "bob@example.com", "password": "s3cret-password"}),
-            &[],
-        ),
-    )
-    .await;
-    let auth = format!("Bearer {}", body["access_token"].as_str().unwrap());
+    let auth = format!(
+        "Bearer {}",
+        register_verified(&app, "bob@example.com", "s3cret-password").await
+    );
 
     let (status, _) = send(
         &app,
@@ -410,26 +452,11 @@ async fn sse_streams_job_updates_until_terminal() {
 
     let app = app();
 
-    // Register + login + launch a job.
-    send(
-        &app,
-        post_json(
-            "/api/auth/register",
-            json!({"email": "sse@example.com", "password": "s3cret-password"}),
-            &[],
-        ),
-    )
-    .await;
-    let (_, body) = send(
-        &app,
-        post_json(
-            "/api/auth/login",
-            json!({"email": "sse@example.com", "password": "s3cret-password"}),
-            &[],
-        ),
-    )
-    .await;
-    let auth = format!("Bearer {}", body["access_token"].as_str().unwrap());
+    // Register + verify + launch a job.
+    let auth = format!(
+        "Bearer {}",
+        register_verified(&app, "sse@example.com", "s3cret-password").await
+    );
     let (_, body) = send(
         &app,
         post_json(
@@ -527,10 +554,10 @@ async fn internal_endpoints_require_the_internal_token() {
 #[tokio::test]
 async fn agent_mode_lifecycle_with_journal() {
     let app = app();
-    let creds = json!({"email": "agent@example.com", "password": "s3cret-password"});
-    send(&app, post_json("/api/auth/register", creds.clone(), &[])).await;
-    let (_, login) = send(&app, post_json("/api/auth/login", creds, &[])).await;
-    let auth = format!("Bearer {}", login["access_token"].as_str().unwrap());
+    let auth = format!(
+        "Bearer {}",
+        register_verified(&app, "agent@example.com", "s3cret-password").await
+    );
 
     let (status, body) = send(
         &app,
@@ -601,10 +628,10 @@ async fn agent_mode_lifecycle_with_journal() {
 #[tokio::test]
 async fn clarification_lifecycle() {
     let app = app();
-    let creds = json!({"email": "hitl@test.dev", "password": "s3cret-password"});
-    send(&app, post_json("/api/auth/register", creds.clone(), &[])).await;
-    let (_, login) = send(&app, post_json("/api/auth/login", creds, &[])).await;
-    let bearer = format!("Bearer {}", login["access_token"].as_str().unwrap());
+    let bearer = format!(
+        "Bearer {}",
+        register_verified(&app, "hitl@test.dev", "s3cret-password").await
+    );
 
     let (_, launched) = send(
         &app,
@@ -701,10 +728,10 @@ async fn clarification_lifecycle() {
 #[tokio::test]
 async fn recurring_search_crud() {
     let app = app();
-    let creds = json!({"email": "recurring@test.dev", "password": "s3cret-password"});
-    send(&app, post_json("/api/auth/register", creds.clone(), &[])).await;
-    let (_, login) = send(&app, post_json("/api/auth/login", creds, &[])).await;
-    let bearer = format!("Bearer {}", login["access_token"].as_str().unwrap());
+    let bearer = format!(
+        "Bearer {}",
+        register_verified(&app, "recurring@test.dev", "s3cret-password").await
+    );
     let auth = [("authorization", bearer.as_str())];
 
     let (status, created) = send(
@@ -767,15 +794,7 @@ async fn login_is_throttled_per_account_and_audited() {
         },
         100,
     );
-    send(
-        &app,
-        post_json(
-            "/api/auth/register",
-            json!({"email": "victim@b.com", "password": "correct-horse"}),
-            &[],
-        ),
-    )
-    .await;
+    register_verified(&app, "victim@b.com", "correct-horse").await;
 
     let bad = json!({"email": "victim@b.com", "password": "wrong"});
     let ip = &[("x-forwarded-for", "9.9.9.9")];
@@ -805,25 +824,10 @@ async fn login_is_throttled_per_account_and_audited() {
 #[tokio::test]
 async fn exceeding_the_daily_quota_is_audited() {
     let (app, audit) = app_with_audit(RateLimitConfig::default(), 0); // quota 0: first search denied
-    send(
-        &app,
-        post_json(
-            "/api/auth/register",
-            json!({"email": "q@b.com", "password": "s3cret-password"}),
-            &[],
-        ),
-    )
-    .await;
-    let (_, login) = send(
-        &app,
-        post_json(
-            "/api/auth/login",
-            json!({"email": "q@b.com", "password": "s3cret-password"}),
-            &[],
-        ),
-    )
-    .await;
-    let auth = format!("Bearer {}", login["access_token"].as_str().unwrap());
+    let auth = format!(
+        "Bearer {}",
+        register_verified(&app, "q@b.com", "s3cret-password").await
+    );
 
     let (status, _) = send(
         &app,
@@ -843,4 +847,402 @@ async fn exceeding_the_daily_quota_is_audited() {
     assert!(events
         .iter()
         .any(|e| e.kind == "quota_exceeded" && e.user_id.is_some()));
+}
+
+// ---------------------------------------------------------------- email verification (ADR-062)
+
+#[tokio::test]
+async fn registering_does_not_sign_you_in_until_the_code_is_answered() {
+    let app = app();
+    let creds = json!({"email": "new@b.com", "password": "s3cret-password"});
+
+    let (status, body) = send(&app, post_json("/api/auth/register", creds.clone(), &[])).await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["verification_required"], json!(true));
+    // Registration issues no session: no token, no refresh cookie.
+    assert!(body["access_token"].is_null());
+    let code = body["verification_code"].as_str().unwrap().to_string();
+
+    // The correct password gets a code, not a session (ADR-063).
+    let (status, body) = send(&app, post_json("/api/auth/login", creds.clone(), &[])).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    assert!(body["access_token"].is_null());
+
+    // That login superseded the registration code, and saying so is the whole
+    // point: "invalid" would send someone hunting for a typo.
+    let resent = body["verification_code"].as_str().unwrap().to_string();
+    assert_ne!(resent, code);
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/auth/verify",
+            json!({"email": "new@b.com", "code": code}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "superseded code: {body}");
+    assert!(
+        body["error"].as_str().unwrap().contains("replaced"),
+        "a stale code must say it was replaced: {body}"
+    );
+
+    // The newest code works, and opens a full session (ADR-008).
+    let response = app
+        .clone()
+        .oneshot(post_json(
+            "/api/auth/verify",
+            json!({"email": "new@b.com", "code": resent}),
+            &[],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(refresh_cookie_value(&response).is_some());
+
+    // Every later sign-in takes a code too — the password never suffices.
+    let (status, body) = send(&app, post_json("/api/auth/login", creds, &[])).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    assert!(body["access_token"].is_null());
+}
+
+#[tokio::test]
+async fn a_stale_code_does_not_spend_an_attempt_on_the_live_one() {
+    // ADR-063. Someone with two emails open reaches for the older one; five of
+    // those must not lock them out of an account they can otherwise open.
+    //
+    // Limits are loosened because this test deliberately makes more than ten
+    // auth calls: the subject is how attempts are *accounted*, and the per-IP
+    // throttle (ADR-017) would otherwise mask it with a 429.
+    let app = app_with(
+        RateLimitConfig {
+            auth_per_minute: 1000,
+            api_per_minute: 100,
+            login_per_minute: 1000,
+            redis_url: None,
+        },
+        100,
+    );
+    let creds = json!({"email": "stale@b.com", "password": "s3cret-password"});
+    let (_, registered) = send(&app, post_json("/api/auth/register", creds.clone(), &[])).await;
+    let first = registered["verification_code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let (_, logged_in) = send(&app, post_json("/api/auth/login", creds, &[])).await;
+    let current = logged_in["verification_code"].as_str().unwrap().to_string();
+
+    for _ in 0..8 {
+        let (status, body) = send(
+            &app,
+            post_json(
+                "/api/auth/verify",
+                json!({"email": "stale@b.com", "code": first}),
+                &[],
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert!(body["error"].as_str().unwrap().contains("replaced"));
+    }
+
+    // The live code is untouched by all that.
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/verify",
+            json!({"email": "stale@b.com", "code": current}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_forgotten_password_can_be_reset_and_signs_you_in() {
+    let app = app();
+    register_verified(&app, "forgetful@b.com", "the-old-password").await;
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/auth/password/forgot",
+            json!({"email": "forgetful@b.com"}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{body}");
+    let code = body["verification_code"].as_str().unwrap().to_string();
+
+    let response = app
+        .clone()
+        .oneshot(post_json(
+            "/api/auth/password/reset",
+            json!({
+                "email": "forgetful@b.com",
+                "code": code,
+                "password": "a-brand-new-password",
+            }),
+            &[],
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    // Recovery ends signed in: both factors were just proved.
+    assert!(refresh_cookie_value(&response).is_some());
+
+    // The new password works and the old one does not.
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/login",
+            json!({"email": "forgetful@b.com", "password": "a-brand-new-password"}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/login",
+            json!({"email": "forgetful@b.com", "password": "the-old-password"}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn a_reset_code_cannot_be_used_to_sign_in() {
+    // ADR-063: the purposes are not interchangeable. Otherwise a reset code
+    // would be a session key that skips the new-password step entirely.
+    let app = app();
+    register_verified(&app, "purpose@b.com", "s3cret-password").await;
+
+    let (_, body) = send(
+        &app,
+        post_json(
+            "/api/auth/password/forgot",
+            json!({"email": "purpose@b.com"}),
+            &[],
+        ),
+    )
+    .await;
+    let reset_code = body["verification_code"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/verify",
+            json!({"email": "purpose@b.com", "code": reset_code}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn forgot_password_reveals_nothing_about_which_addresses_exist() {
+    let app = app();
+    register_verified(&app, "real@b.com", "s3cret-password").await;
+
+    let (unknown_status, unknown) = send(
+        &app,
+        post_json(
+            "/api/auth/password/forgot",
+            json!({"email": "ghost@b.com"}),
+            &[],
+        ),
+    )
+    .await;
+    let (known_status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/password/forgot",
+            json!({"email": "real@b.com"}),
+            &[],
+        ),
+    )
+    .await;
+
+    assert_eq!(unknown_status, known_status);
+    assert_eq!(unknown_status, StatusCode::ACCEPTED);
+    // Only the registered address actually got a code.
+    assert!(unknown["verification_code"].is_null());
+}
+
+#[tokio::test]
+async fn a_reset_revokes_sessions_opened_with_the_old_password() {
+    // The reason most people reach for this form is "someone else is in my
+    // account". A reset that leaves the intruder's refresh cookie alive fails
+    // at the one job it was reached for.
+    let app = app();
+    let (_, registered) = send(
+        &app,
+        post_json(
+            "/api/auth/register",
+            json!({"email": "compromised@b.com", "password": "leaked-password"}),
+            &[],
+        ),
+    )
+    .await;
+    let code = registered["verification_code"].as_str().unwrap();
+    let response = app
+        .clone()
+        .oneshot(post_json(
+            "/api/auth/verify",
+            json!({"email": "compromised@b.com", "code": code}),
+            &[],
+        ))
+        .await
+        .unwrap();
+    let intruder_cookie = refresh_cookie_value(&response).unwrap();
+
+    let (_, forgot) = send(
+        &app,
+        post_json(
+            "/api/auth/password/forgot",
+            json!({"email": "compromised@b.com"}),
+            &[],
+        ),
+    )
+    .await;
+    let reset_code = forgot["verification_code"].as_str().unwrap();
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/password/reset",
+            json!({
+                "email": "compromised@b.com",
+                "code": reset_code,
+                "password": "a-brand-new-password",
+            }),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/refresh",
+            json!({}),
+            &[("cookie", &format!("refresh_token={intruder_cookie}"))],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "the old session must die");
+}
+
+#[tokio::test]
+async fn a_reset_refuses_a_password_that_is_too_short() {
+    let app = app();
+    register_verified(&app, "shorty@b.com", "s3cret-password").await;
+    let (_, body) = send(
+        &app,
+        post_json(
+            "/api/auth/password/forgot",
+            json!({"email": "shorty@b.com"}),
+            &[],
+        ),
+    )
+    .await;
+    let code = body["verification_code"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/password/reset",
+            json!({"email": "shorty@b.com", "code": code, "password": "short"}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // And the code survived, so the retry does not need a fresh email.
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/password/reset",
+            json!({
+                "email": "shorty@b.com",
+                "code": code,
+                "password": "long-enough-password",
+            }),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_wrong_code_is_refused_and_guessing_burns_the_code() {
+    let app = app();
+    let (_, body) = send(
+        &app,
+        post_json(
+            "/api/auth/register",
+            json!({"email": "guess@b.com", "password": "s3cret-password"}),
+            &[],
+        ),
+    )
+    .await;
+    let code = body["verification_code"].as_str().unwrap().to_string();
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    let attempt = |code: &str| {
+        post_json(
+            "/api/auth/verify",
+            json!({"email": "guess@b.com", "code": code}),
+            &[],
+        )
+    };
+
+    for _ in 0..5 {
+        let (status, _) = send(&app, attempt(wrong)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+    // Past the cap the correct code no longer works: brute force is not
+    // eventually rewarded, it is locked out.
+    let (status, body) = send(&app, attempt(&code)).await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{body}");
+}
+
+#[tokio::test]
+async fn resend_reveals_nothing_about_which_addresses_exist() {
+    let app = app();
+    register_verified(&app, "known@b.com", "s3cret-password").await;
+
+    // Unregistered, and registered-but-already-verified, must be answered
+    // exactly like a real send, or this endpoint becomes a way to enumerate
+    // accounts.
+    for email in ["nobody@b.com", "known@b.com"] {
+        let (status, body) = send(
+            &app,
+            post_json("/api/auth/verify/resend", json!({"email": email}), &[]),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{email}: {body}");
+        assert!(body["verification_code"].is_null(), "{email}: {body}");
+    }
+
+    // A code for a verified account is never accepted either.
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/auth/verify",
+            json!({"email": "known@b.com", "code": "123456"}),
+            &[],
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

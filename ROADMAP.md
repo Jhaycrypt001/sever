@@ -6,6 +6,31 @@ Manual setup and deployment steps live in [SETUP.md](SETUP.md).
 
 ## P1 — Core reliability (before real usage)
 
+- [x] **A revocation is refused for a wallet KeeperHub cannot execute as
+      (ADR-065)** — done, found while switching to live mainnet. KeeperHub
+      executes as the wallet behind the API key, the console accepts any scan
+      target, and nothing compared them: scanning a stranger's wallet in agent
+      mode would have burned real gas on a no-op and rendered a real tx hash as
+      `Revoked` while the approval stayed live. Refusals are `not_attempted`
+      with the reason spelled out, and no request is sent at all.
+- [x] **A chain outage no longer sinks the whole scan (ADR-064)** — done: one
+      GoPlus error used to abort the run and discard every finding already
+      collected, so a Base rate-limit meant no Ethereum report either. A failed
+      chain is now a `degraded` journal step and a banner naming the chains
+      that were not reached; only *zero* successful chains fails the job,
+      because an empty result set reads as "no dangerous approvals".
+- [x] **Two-factor sign-in and account recovery (ADR-063)** — done: the emailed
+      code is now the second factor of *every* sign-in, not just the first, so
+      a leaked password is no longer a complete takeover; `LoginUser` cannot
+      reach a `SessionIssuer` at all. Forgetting a password no longer means
+      losing every watched wallet — `/password/forgot` + `/password/reset`
+      recover the account and revoke every session opened with the old one.
+- [x] **E-mail verification at sign-up (ADR-062)** — done: registration used to
+      hand out a session for an address nobody had checked, so a typo sent
+      digests to a stranger and accounts cost nothing to mass-create. An
+      account now exists unverified until a hashed, single-use six-digit code
+      is answered; `EmailSender` is a port (Resend over HTTP, plus a logging
+      stand-in that production refuses).
 - [x] **One frontend: Next.js `web/` (ADR-061, replaces ADR-003)** — done: the
       Vue SPA still spoke the pre-ADR-058 API (`keyword`, `published_at`) and
       could not complete a scan, so it was deleted rather than ported. `web/`

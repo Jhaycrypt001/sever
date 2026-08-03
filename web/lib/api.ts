@@ -126,9 +126,21 @@ export class ApiError extends Error {
   constructor(
     public readonly status: number,
     message: string,
+    /**
+     * The parsed error body. Some failures carry more than a sentence: an
+     * unverified sign-in (ADR-062) returns `code: "email_not_verified"`, which
+     * is what tells the console to open the code screen rather than claim the
+     * password was wrong. Kept as-is so callers read the fields they know.
+     */
+    public readonly body: Record<string, unknown> = {},
   ) {
     super(message)
     this.name = 'ApiError'
+  }
+
+  /** Machine-readable discriminator, where the endpoint provides one. */
+  get code(): string | undefined {
+    return typeof this.body.code === 'string' ? this.body.code : undefined
   }
 }
 
@@ -143,10 +155,13 @@ async function request<T>(
   if (token) headers['Authorization'] = `Bearer ${token}`
   const response = await fetch(path, { ...options, headers })
   if (!response.ok) {
-    const body = (await response.json().catch(() => ({}))) as {
-      error?: string
-    }
-    throw new ApiError(response.status, body.error ?? response.statusText)
+    const body = (await response.json().catch(() => ({}))) as Record<
+      string,
+      unknown
+    >
+    const message =
+      typeof body.error === 'string' ? body.error : response.statusText
+    throw new ApiError(response.status, message, body)
   }
   if (response.status === 204) return undefined as T
   return (await response.json()) as T
@@ -224,16 +239,73 @@ async function streamScan(
 export const api = {
   streamScan,
 
+  /**
+   * Creates the account and mails it a code (ADR-062). It does **not** sign
+   * anyone in — `verifyEmail` does, once the code comes back.
+   *
+   * `verification_code` is only ever present when the backend is running
+   * without a mail provider, which is development and the browser tests; in
+   * production the field is absent and the code is in the inbox.
+   */
   register: (email: string, password: string) =>
-    request<{ id: string; email: string }>('/api/auth/register', {
+    request<{
+      id: string
+      email: string
+      verification_required: boolean
+      verification_code: string | null
+    }>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     }),
 
+  /**
+   * Checks the password and mails a sign-in code (ADR-063). Returns **no
+   * session** — every sign-in takes two factors, and `verifyEmail` finishes it.
+   */
   login: (email: string, password: string) =>
-    request<{ access_token: string }>('/api/auth/login', {
+    request<{ verification_code: string | null }>('/api/auth/login', {
       method: 'POST',
       body: JSON.stringify({ email, password }),
+    }),
+
+  /** Answers a code. This is what actually signs someone in. */
+  verifyEmail: (email: string, code: string) =>
+    request<{ access_token: string }>('/api/auth/verify', {
+      method: 'POST',
+      body: JSON.stringify({ email, code }),
+    }),
+
+  /**
+   * Starts account recovery (ADR-063). Answers the same way whether or not
+   * the address has an account — a forgot-password form that says "no such
+   * user" is an account enumeration tool.
+   */
+  forgotPassword: (email: string) =>
+    request<{ verification_code: string | null }>('/api/auth/password/forgot', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    }),
+
+  /**
+   * Sets a new password from a reset code and signs in. Every other session
+   * for the account is revoked, which is the point for someone resetting
+   * because they think a stranger is inside.
+   */
+  resetPassword: (email: string, code: string, password: string) =>
+    request<{ access_token: string }>('/api/auth/password/reset', {
+      method: 'POST',
+      body: JSON.stringify({ email, code, password }),
+    }),
+
+  /**
+   * Asks for a fresh code, superseding any outstanding one. Answers the same
+   * way whether or not the address needs one, so it cannot be used to find out
+   * who has an account.
+   */
+  resendVerification: (email: string) =>
+    request<{ verification_code: string | null }>('/api/auth/verify/resend', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
     }),
 
   // The refresh token travels in an HttpOnly cookie (ADR-008) — the browser

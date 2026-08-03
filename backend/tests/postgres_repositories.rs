@@ -7,15 +7,18 @@
 //! run in parallel against a shared database.
 
 use backend::adapters::persistence::postgres::{
-    run_migrations, PostgresJobRepository, PostgresRecurringSearchRepository,
-    PostgresRefreshTokenRepository, PostgresSecurityAudit, PostgresUserRepository,
+    run_migrations, PostgresEmailVerificationRepository, PostgresJobRepository,
+    PostgresRecurringSearchRepository, PostgresRefreshTokenRepository, PostgresSecurityAudit,
+    PostgresUserRepository,
 };
 use backend::domain::ports::{
-    JobRepository, RecurringSearchRepository, RefreshTokenRepository, SecurityAudit, UserRepository,
+    EmailVerificationRepository, JobRepository, RecurringSearchRepository, RefreshTokenRepository,
+    SecurityAudit, UserRepository,
 };
 use backend::domain::{
-    AgentStep, ApprovalFinding, JobMode, JobStatus, RecurringSearch, RefreshToken,
-    RevocationStatus, RiskTier, ScanJob, SecurityEvent, SecurityEventKind, User,
+    AgentStep, ApprovalFinding, CodePurpose, EmailVerification, JobMode, JobStatus,
+    RecurringSearch, RefreshToken, RevocationStatus, RiskTier, ScanJob, SecurityEvent,
+    SecurityEventKind, User,
 };
 use chrono::Utc;
 use sqlx::PgPool;
@@ -61,8 +64,235 @@ async fn user_roundtrip() {
     users.insert(&user).await.unwrap();
 
     let found = users.find_by_email(&user.email).await.unwrap();
-    assert_eq!(found, Some(user));
+    assert_eq!(found, Some(user.clone()));
     assert_eq!(users.find_by_email("nobody@test.dev").await.unwrap(), None);
+
+    // ADR-062: a stored account starts unverified, and verifying it sticks.
+    assert!(!found.unwrap().is_verified());
+    let at = backend::domain::RefreshToken::issue(user.id, 1)
+        .0
+        .created_at;
+    users.mark_email_verified(user.id, at).await.unwrap();
+    let reloaded = users.find_by_email(&user.email).await.unwrap().unwrap();
+    assert_eq!(reloaded.email_verified_at, Some(at));
+
+    // Re-verifying keeps the original timestamp rather than rewriting it.
+    users
+        .mark_email_verified(user.id, at + chrono::Duration::hours(1))
+        .await
+        .unwrap();
+    let reloaded = users.find_by_email(&user.email).await.unwrap().unwrap();
+    assert_eq!(reloaded.email_verified_at, Some(at));
+}
+
+#[tokio::test]
+async fn email_verification_roundtrip_and_supersession() {
+    let Some(pool) = pool().await else { return };
+    let user = insert_user(&pool).await;
+    let codes = PostgresEmailVerificationRepository::new(pool);
+
+    let (first, first_plain) = EmailVerification::issue(user.id, CodePurpose::Verify, 10);
+    codes.insert(&first).await.unwrap();
+    let active = codes
+        .active_for_user(user.id, CodePurpose::Verify)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active, first);
+    assert!(active.matches(&first_plain));
+
+    // Attempts accumulate on the stored row, which is what caps guessing.
+    codes.record_attempt(first.id).await.unwrap();
+    codes.record_attempt(first.id).await.unwrap();
+    assert_eq!(
+        codes
+            .active_for_user(user.id, CodePurpose::Verify)
+            .await
+            .unwrap()
+            .unwrap()
+            .attempts,
+        2
+    );
+
+    // A second code supersedes the first: exactly one is ever live (ADR-062).
+    let (second, _) = EmailVerification::issue(user.id, CodePurpose::Verify, 10);
+    codes.insert(&second).await.unwrap();
+    let active = codes
+        .active_for_user(user.id, CodePurpose::Verify)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(active.id, second.id);
+
+    // Consuming it leaves nothing live, so a replay finds no code at all.
+    codes.mark_consumed(second.id, Utc::now()).await.unwrap();
+    assert_eq!(
+        codes
+            .active_for_user(user.id, CodePurpose::Verify)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn the_two_code_purposes_do_not_touch_each_other() {
+    // ADR-063: issuing a reset code must leave a live sign-in code alone, and
+    // neither may be found through the other's purpose.
+    let Some(pool) = pool().await else { return };
+    let user = insert_user(&pool).await;
+    let codes = PostgresEmailVerificationRepository::new(pool);
+
+    let (sign_in, sign_in_plain) = EmailVerification::issue(user.id, CodePurpose::Verify, 10);
+    codes.insert(&sign_in).await.unwrap();
+    let (reset, _) = EmailVerification::issue(user.id, CodePurpose::Reset, 10);
+    codes.insert(&reset).await.unwrap();
+
+    // Both live, each under its own purpose.
+    assert_eq!(
+        codes
+            .active_for_user(user.id, CodePurpose::Verify)
+            .await
+            .unwrap()
+            .map(|c| c.id),
+        Some(sign_in.id)
+    );
+    assert_eq!(
+        codes
+            .active_for_user(user.id, CodePurpose::Reset)
+            .await
+            .unwrap()
+            .map(|c| c.id),
+        Some(reset.id)
+    );
+
+    // A sign-in code is invisible to a reset lookup, which is what stops one
+    // being traded for the other.
+    let hash = EmailVerification::hash(&sign_in_plain);
+    assert!(codes
+        .find_by_hash(user.id, CodePurpose::Reset, &hash)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(codes
+        .find_by_hash(user.id, CodePurpose::Verify, &hash)
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn a_superseded_code_is_still_findable_by_hash() {
+    // ADR-063: this is how "that code was replaced" is told apart from "that
+    // was never a code", so a stale email does not burn an attempt.
+    let Some(pool) = pool().await else { return };
+    let user = insert_user(&pool).await;
+    let codes = PostgresEmailVerificationRepository::new(pool);
+
+    let (first, first_plain) = EmailVerification::issue(user.id, CodePurpose::Verify, 10);
+    codes.insert(&first).await.unwrap();
+    let (second, _) = EmailVerification::issue(user.id, CodePurpose::Verify, 10);
+    codes.insert(&second).await.unwrap();
+
+    let found = codes
+        .find_by_hash(
+            user.id,
+            CodePurpose::Verify,
+            &EmailVerification::hash(&first_plain),
+        )
+        .await
+        .unwrap()
+        .expect("the superseded code is still on file");
+    assert_eq!(found.id, first.id);
+    assert!(found.is_consumed(), "superseding consumes it");
+}
+
+#[tokio::test]
+async fn every_session_can_be_revoked_at_once() {
+    // ADR-063: what a password reset does to an intruder's refresh cookie.
+    let Some(pool) = pool().await else { return };
+    let user = insert_user(&pool).await;
+    let other = insert_user(&pool).await;
+    let tokens = PostgresRefreshTokenRepository::new(pool);
+
+    let (mine_a, _) = RefreshToken::issue(user.id, 30);
+    let (mine_b, _) = RefreshToken::issue(user.id, 30);
+    let (theirs, theirs_plain) = RefreshToken::issue(other.id, 30);
+    for token in [&mine_a, &mine_b, &theirs] {
+        tokens.insert(token).await.unwrap();
+    }
+
+    tokens.delete_for_user(user.id).await.unwrap();
+
+    assert!(tokens
+        .find_by_hash(&mine_a.token_hash)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(tokens
+        .find_by_hash(&mine_b.token_hash)
+        .await
+        .unwrap()
+        .is_none());
+    // Another account's sessions are untouched.
+    assert!(tokens
+        .find_by_hash(&RefreshToken::hash(&theirs_plain))
+        .await
+        .unwrap()
+        .is_some());
+}
+
+#[tokio::test]
+async fn expired_verification_codes_are_purged() {
+    let Some(pool) = pool().await else { return };
+    let user = insert_user(&pool).await;
+    let codes = PostgresEmailVerificationRepository::new(pool);
+
+    // A negative TTL makes this code *already* expired, so the purge can be
+    // driven with a `now` cutoff. Sweeping with a future cutoff instead would
+    // delete live codes belonging to the tests running alongside this one —
+    // `delete_expired` is a global sweep, not scoped to a user.
+    let (stale, _) = EmailVerification::issue(user.id, CodePurpose::Reset, -1);
+    codes.insert(&stale).await.unwrap();
+    let (live, _) = EmailVerification::issue(user.id, CodePurpose::Verify, 10);
+    codes.insert(&live).await.unwrap();
+
+    let purged = codes.delete_expired(Utc::now()).await.unwrap();
+    assert!(purged >= 1, "the expired code should have been swept");
+
+    // The one still inside its TTL survives.
+    assert!(codes
+        .active_for_user(user.id, CodePurpose::Verify)
+        .await
+        .unwrap()
+        .is_some());
+    assert_eq!(
+        codes
+            .active_for_user(user.id, CodePurpose::Reset)
+            .await
+            .unwrap(),
+        None
+    );
+}
+
+#[tokio::test]
+async fn a_live_code_survives_a_purge() {
+    let Some(pool) = pool().await else { return };
+    let user = insert_user(&pool).await;
+    let codes = PostgresEmailVerificationRepository::new(pool);
+
+    let (live, _) = EmailVerification::issue(user.id, CodePurpose::Verify, 10);
+    codes.insert(&live).await.unwrap();
+
+    codes.delete_expired(Utc::now()).await.unwrap();
+    assert!(
+        codes
+            .active_for_user(user.id, CodePurpose::Verify)
+            .await
+            .unwrap()
+            .is_some(),
+        "a code inside its TTL must not be swept"
+    );
 }
 
 #[tokio::test]

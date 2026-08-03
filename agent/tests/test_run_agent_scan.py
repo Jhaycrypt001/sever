@@ -70,7 +70,7 @@ class RecordingRevoker:
         self._fail_for = fail_for or set()
         self.revoked: list[str] = []
 
-    def revoke(self, finding: ApprovalFinding) -> ApprovalFinding:
+    def revoke(self, finding: ApprovalFinding, wallet_address: str) -> ApprovalFinding:
         from dataclasses import replace
 
         self.revoked.append(finding.spender_address)
@@ -346,11 +346,21 @@ def test_a_failing_journal_never_fails_the_job() -> None:
 
 
 def test_scan_failure_reports_and_propagates() -> None:
+    """Every chain unreachable still fails the job (ADR-064 kept this).
+
+    What changed is *when*: a failing chain no longer aborts the loop on the
+    spot, so the policy is allowed to try the others first. The run only fails
+    once it turns out nothing was scanned at all — and the cause still travels
+    with it, because "no chain could be scanned" alone is unactionable.
+    """
+
     class ExplodingSource:
         def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
             raise RuntimeError("GoPlus down")
 
-    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r")])
+    policy = ScriptedPolicy(
+        [ScanAction(chain_id="1", reason="r"), FinishAction(reason="nothing worked")]
+    )
     sink = RecordingSink()
 
     with pytest.raises(RuntimeError, match="GoPlus down"):
@@ -365,7 +375,8 @@ def test_scan_failure_reports_and_propagates() -> None:
             RecordingReporter(),
             max_steps=5,
         )
-    assert sink.failures == [("job-4", "GoPlus down")]
+    assert sink.failures and "GoPlus down" in sink.failures[0][1]
+    assert sink.delivered == []
 
 
 # ---------------------------------------------------------------- auto-revocation (ADR-058)
@@ -575,3 +586,207 @@ def test_one_shot_runs_have_no_report_step_and_stay_new() -> None:
 
     assert results is not None and all(r.is_new for r in results)
     assert all(s.kind is not AgentStepKind.REPORT for s in reporter.steps)
+
+
+# ---------------------------------------------------------------- chain resilience (ADR-064)
+
+
+class FlakySource:
+    """Fails on the named chains, returns canned approvals for the rest."""
+
+    def __init__(
+        self, by_chain: dict[str, list[RawApproval]], failing: dict[str, Exception]
+    ) -> None:
+        self._by_chain = by_chain
+        self._failing = failing
+        self.chain_ids: list[str] = []
+
+    def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
+        self.chain_ids.append(chain_id)
+        if chain_id in self._failing:
+            raise self._failing[chain_id]
+        return self._by_chain.get(chain_id, [])
+
+
+def test_a_failing_chain_becomes_a_degraded_step_and_the_loop_continues() -> None:
+    # ADR-064: the loop used to die on the first provider error, throwing away
+    # every finding collected before it.
+    source = FlakySource(
+        {"1": [approval("a", "1")]},
+        {"8453": RuntimeError("GoPlus error (code 4029): rate limited")},
+    )
+    policy = ScriptedPolicy(
+        [
+            ScanAction(chain_id="8453", reason="base first"),
+            ScanAction(chain_id="1", reason="then ethereum"),
+            FinishAction(reason="done"),
+        ]
+    )
+    sink, reporter = RecordingSink(), RecordingReporter()
+
+    results = run_agent_scan(
+        "job-1", "goal", "0xwallet", source, NeutralThreatIntel(), policy, sink, reporter
+    )
+
+    assert results is not None
+    assert [f.spender_address for f in results] == ["a"]
+    kinds = [s.kind for s in reporter.steps]
+    assert AgentStepKind.DEGRADED in kinds
+    assert AgentStepKind.SCAN in kinds
+    degraded = next(s for s in reporter.steps if s.kind is AgentStepKind.DEGRADED)
+    assert degraded.detail == "8453"
+    assert "rate limited" in degraded.reason
+    assert sink.delivered == [("job-1", 1)]
+
+
+def test_a_degraded_step_does_not_consume_the_scan_budget_silently() -> None:
+    # The step is still journalled with its own seq, so the run's coverage is
+    # readable after the fact rather than inferred from a gap.
+    source = FlakySource({"1": [approval("a", "1")]}, {"8453": RuntimeError("boom")})
+    policy = ScriptedPolicy(
+        [
+            ScanAction(chain_id="8453", reason="base"),
+            ScanAction(chain_id="1", reason="ethereum"),
+            FinishAction(reason="done"),
+        ]
+    )
+    reporter = RecordingReporter()
+
+    run_agent_scan(
+        "job-1", "goal", "0xwallet", source, NeutralThreatIntel(), policy, RecordingSink(), reporter
+    )
+
+    seqs = [s.seq for s in reporter.steps]
+    assert seqs == sorted(seqs), f"journal seqs must stay ordered: {seqs}"
+    assert len(seqs) == len(set(seqs)), f"journal seqs must be unique: {seqs}"
+
+
+def test_every_chain_failing_fails_the_run_rather_than_delivering_nothing() -> None:
+    # An empty delivery renders as "no dangerous approvals" — a clean bill of
+    # health for a wallet the agent never managed to look at.
+    source = FlakySource({}, {"1": RuntimeError("down"), "8453": RuntimeError("down")})
+    policy = ScriptedPolicy(
+        [
+            ScanAction(chain_id="1", reason="ethereum"),
+            ScanAction(chain_id="8453", reason="base"),
+            FinishAction(reason="done"),
+        ]
+    )
+    sink = RecordingSink()
+
+    with pytest.raises(RuntimeError, match="no chain could be scanned"):
+        run_agent_scan(
+            "job-1",
+            "goal",
+            "0xwallet",
+            source,
+            NeutralThreatIntel(),
+            policy,
+            sink,
+            RecordingReporter(),
+        )
+
+    assert sink.delivered == []
+    assert sink.failures, "the job is marked failed, not quietly empty"
+
+
+def test_a_failing_chain_never_triggers_a_revocation() -> None:
+    # Nothing was read from that chain, so nothing from it may be acted on.
+    source = FlakySource({}, {"8453": RuntimeError("down")})
+    policy = ScriptedPolicy(
+        [
+            ScanAction(chain_id="8453", reason="base"),
+            ScanAction(chain_id="1", reason="ethereum"),
+            FinishAction(reason="done"),
+        ]
+    )
+    revoker = RecordingRevoker()
+
+    run_agent_scan(
+        "job-1",
+        "goal",
+        "0xwallet",
+        source,
+        NeutralThreatIntel(),
+        policy,
+        RecordingSink(),
+        RecordingReporter(),
+        revoker=revoker,
+    )
+
+    assert revoker.revoked == []
+
+
+# ---------------------------------------------------------------- delegation (ADR-065)
+
+
+def test_a_refused_revocation_is_journalled_as_not_attempted_not_revoked() -> None:
+    """The guard's outcome has to reach the UI honestly.
+
+    A wallet that is not delegated to KeeperHub cannot have its approvals
+    revoked by anyone but its owner. The row must read "not attempted" with
+    the reason, never "revoked" — a receipt for a revocation that did not
+    happen is the most expensive lie this product could tell (ADR-059/065).
+    """
+
+    class RefusingRevoker:
+        """Stands in for the KeeperHub adapter refusing a foreign wallet."""
+
+        def revoke(self, finding: ApprovalFinding, wallet_address: str) -> ApprovalFinding:
+            from dataclasses import replace
+
+            return replace(finding, revocation_status=RevocationStatus.NOT_ATTEMPTED)
+
+    source = MappedSource({"1": [approval("dangerous")]})
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r"), FinishAction(reason="done")])
+    sink, reporter = RecordingSink(), RecordingReporter()
+
+    results = run_agent_scan(
+        "job-guard",
+        "goal",
+        "0xwallet",
+        source,
+        TieredThreatIntel({"dangerous": RiskTier.DANGEROUS}),
+        policy,
+        sink,
+        reporter,
+        revoker=RefusingRevoker(),
+    )
+
+    assert results is not None
+    assert results[0].revocation_status is RevocationStatus.NOT_ATTEMPTED
+    assert results[0].revocation_tx_hash is None
+    revoke_step = next(s for s in reporter.steps if s.kind is AgentStepKind.REVOKE)
+    assert "not attempted" in revoke_step.reason
+    assert "not delegated" in revoke_step.reason
+
+
+def test_the_scanned_wallet_is_what_reaches_the_revoker() -> None:
+    # The guard is only as good as the wallet it is handed: if the use case
+    # passed the wrong one, the adapter would happily execute for a wallet the
+    # scan was never about.
+    seen: list[str] = []
+
+    class WalletRecordingRevoker:
+        def revoke(self, finding: ApprovalFinding, wallet_address: str) -> ApprovalFinding:
+            from dataclasses import replace
+
+            seen.append(wallet_address)
+            return replace(finding, revocation_status=RevocationStatus.REVOKED)
+
+    source = MappedSource({"1": [approval("dangerous")]})
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r"), FinishAction(reason="done")])
+
+    run_agent_scan(
+        "job-wallet",
+        "goal",
+        "0xTHE-SCANNED-WALLET",
+        source,
+        TieredThreatIntel({"dangerous": RiskTier.DANGEROUS}),
+        policy,
+        RecordingSink(),
+        RecordingReporter(),
+        revoker=WalletRecordingRevoker(),
+    )
+
+    assert seen == ["0xTHE-SCANNED-WALLET"]

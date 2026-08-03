@@ -11,11 +11,14 @@ use axum::http::Request;
 use axum::Router;
 use backend::adapters::auth::{Argon2PasswordHasher, JwtTokenService};
 use backend::adapters::dispatch::{HttpJobDispatcher, NoopJobDispatcher};
+use backend::adapters::email::DevEmailSender;
 use backend::adapters::http::rate_limit::Limiter;
-use backend::adapters::http::{router_with_limits, AppState, RateLimitConfig};
+use backend::adapters::http::{
+    router_with_limits, AppState, EmailVerificationSetup, RateLimitConfig,
+};
 use backend::adapters::persistence::in_memory::{
-    InMemoryJobRepository, InMemoryRecurringSearchRepository, InMemoryRefreshTokenRepository,
-    InMemorySecurityAudit, InMemoryUserRepository,
+    InMemoryEmailVerificationRepository, InMemoryJobRepository, InMemoryRecurringSearchRepository,
+    InMemoryRefreshTokenRepository, InMemorySecurityAudit, InMemoryUserRepository,
 };
 use backend::domain::ports::JobDispatcher;
 use backend::domain::{JobMode, ScanJob};
@@ -44,6 +47,13 @@ fn app() -> Router {
         Arc::new(Argon2PasswordHasher),
         Arc::new(JwtTokenService::new("test-secret", 15)),
         Arc::new(InMemorySecurityAudit::default()),
+        EmailVerificationSetup {
+            verifications: Arc::new(InMemoryEmailVerificationRepository::default()),
+            mailer: Arc::new(DevEmailSender::default()),
+            ttl_minutes: 10,
+            expose_codes: true,
+            throttle: Limiter::per_minute(1000, "verify", None),
+        },
         Limiter::per_minute(1000, "login", None),
         INTERNAL_TOKEN.into(),
         100,
@@ -75,12 +85,23 @@ fn post(uri: &str, body: String, headers: &[(&str, &str)]) -> Request<Body> {
     builder.body(Body::from(body)).unwrap()
 }
 
-/// Registers + logs in + launches a search; returns (bearer, job_id).
+/// Registers + verifies + launches a search; returns (bearer, job_id).
 async fn user_with_job(app: &Router) -> (String, String) {
     let creds = r#"{"email":"contract@test.dev","password":"s3cret-password"}"#;
-    call(app, post("/api/auth/register", creds.into(), &[])).await;
-    let (_, login) = call(app, post("/api/auth/login", creds.into(), &[])).await;
-    let bearer = format!("Bearer {}", login["access_token"].as_str().unwrap());
+    // ADR-062: registration issues no session — answering the emailed code
+    // does. These tests run the development mailer, which returns the code.
+    let (_, registered) = call(app, post("/api/auth/register", creds.into(), &[])).await;
+    let code = registered["verification_code"].as_str().unwrap();
+    let (_, session) = call(
+        app,
+        post(
+            "/api/auth/verify",
+            format!(r#"{{"email":"contract@test.dev","code":"{code}"}}"#),
+            &[],
+        ),
+    )
+    .await;
+    let bearer = format!("Bearer {}", session["access_token"].as_str().unwrap());
     let (_, launched) = call(
         app,
         post(

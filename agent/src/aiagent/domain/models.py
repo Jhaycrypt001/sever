@@ -166,6 +166,12 @@ class AgentStepKind(StrEnum):
     FINISH = "finish"
     REVOKE = "revoke"
     REPORT = "report"
+    #: A chain that could not be scanned (ADR-064). Recorded rather than
+    #: raised, so one provider outage does not throw away everything the other
+    #: chains found — but recorded *loudly*, because "no dangerous approvals"
+    #: over a chain nobody actually looked at is the same class of lie as a
+    #: simulated revocation presented as real (ADR-059).
+    DEGRADED = "degraded"
 
 
 @dataclass(frozen=True)

@@ -13,6 +13,17 @@ from aiagent.adapters.keeperhub import KeeperHubApprovalRevoker
 from aiagent.domain.models import ApprovalFinding, RevocationStatus, RiskTier
 
 API_URL = "https://app.keeperhub.com"
+#: The wallet the API key executes as. Every test mocks `GET /api/user` to
+#: return it, because ADR-065 refuses to revoke for any other wallet.
+WALLET = "0xe13ed979bc6b23d6d9608939051e9488e9f304bf"
+
+
+def mock_delegated_wallet(address: str = WALLET):  # type: ignore[no-untyped-def]
+    """Arms `GET /api/user` and hands back the route, so a test can assert how
+    many times the wallet was read."""
+    return respx.get(f"{API_URL}/api/user").mock(
+        return_value=httpx.Response(200, json={"walletAddress": address})
+    )
 
 
 def a_finding() -> ApprovalFinding:
@@ -29,6 +40,7 @@ def a_finding() -> ApprovalFinding:
 @respx.mock
 def test_revoke_posts_string_typed_fields_and_polls_status_for_the_tx_hash() -> None:
     # #1841: chainId/functionArgs/gasLimitMultiplier must be strings.
+    mock_delegated_wallet()
     post_route = respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
     )
@@ -45,7 +57,7 @@ def test_revoke_posts_string_typed_fields_and_polls_status_for_the_tx_hash() -> 
     )
     revoker = KeeperHubApprovalRevoker(API_URL, "kh_test_key", poll_interval_seconds=0)
 
-    result = revoker.revoke(a_finding())
+    result = revoker.revoke(a_finding(), WALLET)
 
     body = json.loads(post_route.calls.last.request.content)
     assert body["chainId"] == "1" and isinstance(body["chainId"], str)
@@ -61,6 +73,7 @@ def test_revoke_posts_string_typed_fields_and_polls_status_for_the_tx_hash() -> 
 def test_revoke_sends_a_fresh_idempotency_key_per_attempt() -> None:
     # #1840: a reused Idempotency-Key caches a failure forever. Two separate
     # `revoke` calls (e.g. a Celery retry) must never reuse one.
+    mock_delegated_wallet()
     post_route = respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
     )
@@ -69,8 +82,8 @@ def test_revoke_sends_a_fresh_idempotency_key_per_attempt() -> None:
     )
     revoker = KeeperHubApprovalRevoker(API_URL, "kh_test_key", poll_interval_seconds=0)
 
-    revoker.revoke(a_finding())
-    revoker.revoke(a_finding())
+    revoker.revoke(a_finding(), WALLET)
+    revoker.revoke(a_finding(), WALLET)
 
     keys = [c.request.headers["idempotency-key"] for c in post_route.calls]
     assert len(keys) == 2 and keys[0] != keys[1]
@@ -78,6 +91,7 @@ def test_revoke_sends_a_fresh_idempotency_key_per_attempt() -> None:
 
 @respx.mock
 def test_revoke_returns_failed_when_execution_never_completes() -> None:
+    mock_delegated_wallet()
     respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
     )
@@ -86,7 +100,7 @@ def test_revoke_returns_failed_when_execution_never_completes() -> None:
     )
     revoker = KeeperHubApprovalRevoker(API_URL, "kh_test_key", poll_interval_seconds=0)
 
-    result = revoker.revoke(a_finding())
+    result = revoker.revoke(a_finding(), WALLET)
 
     assert result.revocation_status == RevocationStatus.FAILED
     assert result.revocation_tx_hash is None
@@ -94,18 +108,20 @@ def test_revoke_returns_failed_when_execution_never_completes() -> None:
 
 @respx.mock
 def test_revoke_returns_failed_when_no_execution_id_comes_back() -> None:
+    mock_delegated_wallet()
     respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(200, json={"status": "completed"})
     )
     revoker = KeeperHubApprovalRevoker(API_URL, "kh_test_key")
 
-    result = revoker.revoke(a_finding())
+    result = revoker.revoke(a_finding(), WALLET)
 
     assert result.revocation_status == RevocationStatus.FAILED
 
 
 @respx.mock
 def test_simulate_only_flag_is_forwarded() -> None:
+    mock_delegated_wallet()
     post_route = respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(
             200,
@@ -116,7 +132,7 @@ def test_simulate_only_flag_is_forwarded() -> None:
         API_URL, "kh_test_key", simulate_only=True, poll_interval_seconds=0
     )
 
-    revoker.revoke(a_finding())
+    revoker.revoke(a_finding(), WALLET)
 
     body = json.loads(post_route.calls.last.request.content)
     assert body["simulate"] is True
@@ -129,6 +145,7 @@ def test_a_successful_simulation_is_never_reported_as_revoked() -> None:
     # a different response shape from a real execution, not just a stub of it.
     # No transaction was broadcast, so the approval is STILL LIVE: reporting
     # REVOKED here would tell a user a draining approval is gone when it is not.
+    mock_delegated_wallet()
     respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(
             200,
@@ -146,7 +163,7 @@ def test_a_successful_simulation_is_never_reported_as_revoked() -> None:
         API_URL, "kh_test_key", simulate_only=True, poll_interval_seconds=0
     )
 
-    result = revoker.revoke(a_finding())
+    result = revoker.revoke(a_finding(), WALLET)
 
     assert result.revocation_status == RevocationStatus.SIMULATED
     assert result.revocation_status != RevocationStatus.REVOKED
@@ -155,6 +172,7 @@ def test_a_successful_simulation_is_never_reported_as_revoked() -> None:
 
 @respx.mock
 def test_a_reverting_simulation_is_reported_as_failed() -> None:
+    mock_delegated_wallet()
     respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(
             200,
@@ -165,20 +183,23 @@ def test_a_reverting_simulation_is_reported_as_failed() -> None:
         API_URL, "kh_test_key", simulate_only=True, poll_interval_seconds=0
     )
 
-    result = revoker.revoke(a_finding())
+    result = revoker.revoke(a_finding(), WALLET)
 
     assert result.revocation_status == RevocationStatus.FAILED
 
 
 @respx.mock
 def test_authorization_header_carries_the_bearer_key() -> None:
+    mock_delegated_wallet()
     route = respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
     )
     respx.get(f"{API_URL}/api/execute/exec-1/status").mock(
         return_value=httpx.Response(200, json={"status": "completed", "transactionHash": "0x1"})
     )
-    KeeperHubApprovalRevoker(API_URL, "kh_secret", poll_interval_seconds=0).revoke(a_finding())
+    KeeperHubApprovalRevoker(API_URL, "kh_secret", poll_interval_seconds=0).revoke(
+        a_finding(), WALLET
+    )
 
     assert route.calls.last.request.headers["authorization"] == "Bearer kh_secret"
 
@@ -187,13 +208,14 @@ def test_authorization_header_carries_the_bearer_key() -> None:
 def test_a_failed_revoke_logs_the_audit_line(caplog) -> None:
     # The audit trail (ADR-058/018): every attempt, success or failure, as a
     # structured log line — greppable/alertable without a DB query.
+    mock_delegated_wallet()
     respx.post(f"{API_URL}/api/execute/contract-call").mock(
         return_value=httpx.Response(200, json={"status": "completed"})
     )
     revoker = KeeperHubApprovalRevoker(API_URL, "kh_test_key")
 
     with caplog.at_level(logging.INFO, logger="aiagent.adapters.keeperhub"):
-        revoker.revoke(a_finding())
+        revoker.revoke(a_finding(), WALLET)
 
     record = next(r for r in caplog.records if r.message == "revocation attempt")
     assert record.revocation_status == "failed"  # type: ignore[attr-defined]
@@ -203,6 +225,7 @@ def test_a_failed_revoke_logs_the_audit_line(caplog) -> None:
 
 @respx.mock
 def test_meters_one_call_per_revoke_attempt() -> None:
+    mock_delegated_wallet()
     from aiagent.domain.usage import UsageMeter
 
     respx.post(f"{API_URL}/api/execute/contract-call").mock(
@@ -213,7 +236,84 @@ def test_meters_one_call_per_revoke_attempt() -> None:
     )
     meter = UsageMeter()
     KeeperHubApprovalRevoker(API_URL, "kh_key", meter=meter, poll_interval_seconds=0).revoke(
-        a_finding()
+        a_finding(), WALLET
     )
 
     assert meter.snapshot().search_calls == 1
+
+
+# ---------------------------------------------------------------- delegation guard (ADR-065)
+
+
+@respx.mock
+def test_refuses_to_revoke_for_a_wallet_it_cannot_execute_as() -> None:
+    """The scanned wallet is not the delegated one: nothing may be sent.
+
+    `approve(spender, 0)` clears the allowance of whoever *sends* it. Executed
+    from the operator's wallet on behalf of somebody else's, it is a real,
+    gas-burning no-op that still returns a transaction hash — and that hash
+    would be rendered as proof the approval is gone. The most expensive lie
+    this product could tell comes with a receipt.
+    """
+    mock_delegated_wallet()
+    post_route = respx.post(f"{API_URL}/api/execute/contract-call").mock(
+        return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
+    )
+    revoker = KeeperHubApprovalRevoker(API_URL, "kh_key", poll_interval_seconds=0)
+
+    result = revoker.revoke(a_finding(), "0x00000000000000000000000000000000deadbeef")
+
+    assert result.revocation_status == RevocationStatus.NOT_ATTEMPTED
+    assert result.revocation_tx_hash is None
+    assert not post_route.called, "nothing may be broadcast for a foreign wallet"
+
+
+@respx.mock
+def test_the_wallet_comparison_ignores_address_casing() -> None:
+    # EVM addresses are routinely rendered in EIP-55 checksum case; a
+    # case-sensitive compare would refuse the operator's own wallet.
+    mock_delegated_wallet()
+    respx.post(f"{API_URL}/api/execute/contract-call").mock(
+        return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
+    )
+    respx.get(f"{API_URL}/api/execute/exec-1/status").mock(
+        return_value=httpx.Response(200, json={"status": "completed", "transactionHash": "0xa"})
+    )
+    revoker = KeeperHubApprovalRevoker(API_URL, "kh_key", poll_interval_seconds=0)
+
+    result = revoker.revoke(a_finding(), WALLET.upper().replace("0X", "0x"))
+
+    assert result.revocation_status == RevocationStatus.REVOKED
+
+
+@respx.mock
+def test_an_unreadable_delegated_wallet_blocks_revocation() -> None:
+    # Unknown is not permission. If KeeperHub will not say which wallet this
+    # key acts as, the guard cannot be evaluated and nothing may be sent.
+    respx.get(f"{API_URL}/api/user").mock(return_value=httpx.Response(500, json={}))
+    post_route = respx.post(f"{API_URL}/api/execute/contract-call").mock(
+        return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
+    )
+    revoker = KeeperHubApprovalRevoker(API_URL, "kh_key", poll_interval_seconds=0)
+
+    result = revoker.revoke(a_finding(), WALLET)
+
+    assert result.revocation_status == RevocationStatus.NOT_ATTEMPTED
+    assert not post_route.called
+
+
+@respx.mock
+def test_the_delegated_wallet_is_read_once_and_cached() -> None:
+    user_route = mock_delegated_wallet()
+    respx.post(f"{API_URL}/api/execute/contract-call").mock(
+        return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
+    )
+    respx.get(f"{API_URL}/api/execute/exec-1/status").mock(
+        return_value=httpx.Response(200, json={"status": "completed", "transactionHash": "0xa"})
+    )
+    revoker = KeeperHubApprovalRevoker(API_URL, "kh_key", poll_interval_seconds=0)
+
+    revoker.revoke(a_finding(), WALLET)
+    revoker.revoke(a_finding(), WALLET)
+
+    assert user_route.call_count == 1, "the wallet cannot change for the life of a key"

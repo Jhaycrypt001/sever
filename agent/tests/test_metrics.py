@@ -14,6 +14,10 @@ from aiagent.adapters.keeperhub import KeeperHubApprovalRevoker
 from aiagent.adapters.llm import ActionReply, LlmAgentPolicy
 from aiagent.domain.models import ApprovalFinding, RiskTier
 
+#: The wallet the KeeperHub key executes as (ADR-065): revocation is refused
+#: for any other, so this test must present a matching one.
+WALLET = "0xe13ed979bc6b23d6d9608939051e9488e9f304bf"
+
 
 class FakeChat:
     def __init__(self, parsed: object, input_tokens: int = 11, output_tokens: int = 5) -> None:
@@ -70,6 +74,10 @@ def test_agent_metrics_are_recorded() -> None:
     assert any(p.value == 0.25 and p.attributes.get("outcome") == "completed" for p in cost)
 
     # KeeperHub revocations (ADR-058 amendment): count + call-latency histogram.
+    # ADR-065: the adapter reads its delegated wallet before executing.
+    respx.get("https://app.keeperhub.com/api/user").mock(
+        return_value=httpx.Response(200, json={"walletAddress": WALLET})
+    )
     respx.post("https://app.keeperhub.com/api/execute/contract-call").mock(
         return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
     )
@@ -86,7 +94,8 @@ def test_agent_metrics_are_recorded() -> None:
             spender_address="0xbad",
             approved_amount="Unlimited",
             tier=RiskTier.DANGEROUS,
-        )
+        ),
+        WALLET,
     )
     revocations = _points(reader, "aiagent.revocations")
     assert any(

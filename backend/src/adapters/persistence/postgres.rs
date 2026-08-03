@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 use crate::adapters::leader_lock::LeaderLock;
 use crate::domain::ports::{
-    JobRepository, PortError, RecurringSearchRepository, RefreshTokenRepository, SecurityAudit,
-    UserRepository,
+    EmailVerificationRepository, JobRepository, PortError, RecurringSearchRepository,
+    RefreshTokenRepository, SecurityAudit, UserRepository,
 };
-use crate::domain::SecurityEvent;
+use crate::domain::{CodePurpose, EmailVerification, SecurityEvent};
 
 /// Advisory-lock key for the background loop (ADR-053): a fixed application id
 /// so every replica contends on the same lock.
@@ -184,8 +184,27 @@ fn user_from_row(row: &PgRow) -> User {
         id: row.get("id"),
         email: row.get("email"),
         password_hash: row.get("password_hash"),
+        email_verified_at: row.get("email_verified_at"),
         created_at: row.get("created_at"),
     }
+}
+
+fn email_verification_from_row(row: &PgRow) -> Result<EmailVerification, PortError> {
+    let raw: String = row.get("purpose");
+    // An unrecognised purpose is a corrupt row, not a code to guess at: better
+    // to fail the request than to treat a reset code as a sign-in code.
+    let purpose = CodePurpose::parse(&raw)
+        .ok_or_else(|| PortError(format!("unknown verification code purpose: {raw}")))?;
+    Ok(EmailVerification {
+        id: row.get("id"),
+        user_id: row.get("user_id"),
+        purpose,
+        code_hash: row.get("code_hash"),
+        expires_at: row.get("expires_at"),
+        attempts: row.get("attempts"),
+        consumed_at: row.get("consumed_at"),
+        created_at: row.get("created_at"),
+    })
 }
 
 fn job_from_row(row: &PgRow) -> Result<ScanJob, PortError> {
@@ -246,11 +265,13 @@ impl PostgresUserRepository {
 impl UserRepository for PostgresUserRepository {
     async fn insert(&self, user: &User) -> Result<(), PortError> {
         sqlx::query(
-            "INSERT INTO users (id, email, password_hash, created_at) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO users (id, email, password_hash, email_verified_at, created_at) \
+             VALUES ($1, $2, $3, $4, $5)",
         )
         .bind(user.id)
         .bind(&user.email)
         .bind(&user.password_hash)
+        .bind(user.email_verified_at)
         .bind(user.created_at)
         .execute(&self.pool)
         .await
@@ -259,13 +280,159 @@ impl UserRepository for PostgresUserRepository {
     }
 
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, PortError> {
-        let row =
-            sqlx::query("SELECT id, email, password_hash, created_at FROM users WHERE email = $1")
-                .bind(email)
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(db_err)?;
+        let row = sqlx::query(
+            "SELECT id, email, password_hash, email_verified_at, created_at \
+             FROM users WHERE email = $1",
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
         Ok(row.as_ref().map(user_from_row))
+    }
+
+    async fn mark_email_verified(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), PortError> {
+        // `IS NULL` keeps the first verification's timestamp: re-running this
+        // (a double-submitted form, a retry) must not rewrite history.
+        sqlx::query(
+            "UPDATE users SET email_verified_at = $2 WHERE id = $1 AND email_verified_at IS NULL",
+        )
+        .bind(id)
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn update_password_hash(&self, id: Uuid, hash: &str) -> Result<(), PortError> {
+        sqlx::query("UPDATE users SET password_hash = $2 WHERE id = $1")
+            .bind(id)
+            .bind(hash)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------- email verification
+
+pub struct PostgresEmailVerificationRepository {
+    pool: PgPool,
+}
+
+impl PostgresEmailVerificationRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait]
+impl EmailVerificationRepository for PostgresEmailVerificationRepository {
+    async fn insert(&self, verification: &EmailVerification) -> Result<(), PortError> {
+        // Supersede then insert, in one transaction: a reader must never see
+        // two live codes for one account, nor zero while a resend is midway.
+        let mut tx = self.pool.begin().await.map_err(db_err)?;
+        sqlx::query(
+            "UPDATE email_verifications SET consumed_at = $3 \
+             WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL",
+        )
+        .bind(verification.user_id)
+        .bind(verification.purpose.as_str())
+        .bind(verification.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        sqlx::query(
+            "INSERT INTO email_verifications \
+             (id, user_id, purpose, code_hash, expires_at, attempts, consumed_at, created_at) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(verification.id)
+        .bind(verification.user_id)
+        .bind(verification.purpose.as_str())
+        .bind(&verification.code_hash)
+        .bind(verification.expires_at)
+        .bind(verification.attempts)
+        .bind(verification.consumed_at)
+        .bind(verification.created_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(db_err)?;
+        tx.commit().await.map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn active_for_user(
+        &self,
+        user_id: Uuid,
+        purpose: CodePurpose,
+    ) -> Result<Option<EmailVerification>, PortError> {
+        let row = sqlx::query(
+            "SELECT id, user_id, purpose, code_hash, expires_at, attempts, consumed_at, created_at \
+             FROM email_verifications \
+             WHERE user_id = $1 AND purpose = $2 AND consumed_at IS NULL \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(purpose.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        row.as_ref().map(email_verification_from_row).transpose()
+    }
+
+    async fn find_by_hash(
+        &self,
+        user_id: Uuid,
+        purpose: CodePurpose,
+        code_hash: &str,
+    ) -> Result<Option<EmailVerification>, PortError> {
+        let row = sqlx::query(
+            "SELECT id, user_id, purpose, code_hash, expires_at, attempts, consumed_at, created_at \
+             FROM email_verifications \
+             WHERE user_id = $1 AND purpose = $2 AND code_hash = $3 \
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(user_id)
+        .bind(purpose.as_str())
+        .bind(code_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        row.as_ref().map(email_verification_from_row).transpose()
+    }
+
+    async fn record_attempt(&self, id: Uuid) -> Result<(), PortError> {
+        sqlx::query("UPDATE email_verifications SET attempts = attempts + 1 WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn mark_consumed(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), PortError> {
+        sqlx::query(
+            "UPDATE email_verifications SET consumed_at = $2 \
+             WHERE id = $1 AND consumed_at IS NULL",
+        )
+        .bind(id)
+        .bind(at)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, PortError> {
+        let result = sqlx::query("DELETE FROM email_verifications WHERE expires_at <= $1")
+            .bind(now)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected())
     }
 }
 
@@ -344,6 +511,15 @@ impl RefreshTokenRepository for PostgresRefreshTokenRepository {
     async fn delete_family(&self, family_id: Uuid) -> Result<(), PortError> {
         sqlx::query("DELETE FROM refresh_tokens WHERE family_id = $1")
             .bind(family_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn delete_for_user(&self, user_id: Uuid) -> Result<(), PortError> {
+        sqlx::query("DELETE FROM refresh_tokens WHERE user_id = $1")
+            .bind(user_id)
             .execute(&self.pool)
             .await
             .map_err(db_err)?;

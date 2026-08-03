@@ -306,6 +306,9 @@ def run_scan_task(
                 threat_intel,
                 sink,
                 seen_keys=memory,
+                # The sink also implements StepReporter, which is how a
+                # workflow run records an unscannable chain (ADR-064).
+                reporter=sink,
             )
         job_outcome = "completed"
     except Exception:

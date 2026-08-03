@@ -58,9 +58,18 @@ class ApprovalRevoker(Protocol):
     callbacks stance: this port touches nothing but KeeperHub's API, still
     never the database or a raw private key). Must not raise on a failed
     execution — a revocation failure is a `RevocationStatus.FAILED` result,
-    reported like any other outcome, never a crashed job."""
+    reported like any other outcome, never a crashed job.
 
-    def revoke(self, finding: ApprovalFinding) -> ApprovalFinding: ...
+    `wallet_address` is the wallet the scan was run for, and the implementation
+    **must refuse to act unless it can execute as that wallet** (ADR-065). An
+    `approve(spender, 0)` only clears the allowance of the account that sends
+    it: executed on behalf of anyone else it is a real, gas-burning no-op that
+    would still come back with a transaction hash — a receipt proving a
+    revocation that did not happen. Refusals are `NOT_ATTEMPTED`, never
+    `FAILED`: nothing was tried.
+    """
+
+    def revoke(self, finding: ApprovalFinding, wallet_address: str) -> ApprovalFinding: ...
 
 
 class StepReporter(Protocol):

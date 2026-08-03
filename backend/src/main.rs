@@ -8,22 +8,24 @@ use std::sync::Arc;
 use backend::adapters::auth::{Argon2PasswordHasher, JwtTokenService};
 use backend::adapters::digest::WebhookDigestSender;
 use backend::adapters::dispatch::{HttpJobDispatcher, NoopJobDispatcher};
+use backend::adapters::email::{DevEmailSender, ResendEmailSender};
 use backend::adapters::http::rate_limit::Limiter;
-use backend::adapters::http::{router_with_limits, AppState};
+use backend::adapters::http::{router_with_limits, AppState, EmailVerificationSetup};
 use backend::adapters::leader_lock::{LeaderLock, NoopLeaderLock};
 use backend::adapters::persistence::in_memory::{
-    InMemoryJobRepository, InMemoryRecurringSearchRepository, InMemoryRefreshTokenRepository,
-    InMemorySecurityAudit, InMemoryUserRepository,
+    InMemoryEmailVerificationRepository, InMemoryJobRepository, InMemoryRecurringSearchRepository,
+    InMemoryRefreshTokenRepository, InMemorySecurityAudit, InMemoryUserRepository,
 };
 use backend::adapters::persistence::postgres::{
-    run_migrations, PostgresJobRepository, PostgresLeaderLock, PostgresRecurringSearchRepository,
-    PostgresRefreshTokenRepository, PostgresSecurityAudit, PostgresUserRepository,
+    run_migrations, PostgresEmailVerificationRepository, PostgresJobRepository, PostgresLeaderLock,
+    PostgresRecurringSearchRepository, PostgresRefreshTokenRepository, PostgresSecurityAudit,
+    PostgresUserRepository,
 };
 use backend::application::{FailStaleJobs, RunDueSearches};
 use backend::config::AppConfig;
 use backend::domain::ports::{
-    JobDispatcher, JobRepository, RecurringSearchRepository, RefreshTokenRepository, SecurityAudit,
-    UserRepository,
+    EmailSender, EmailVerificationRepository, JobDispatcher, JobRepository,
+    RecurringSearchRepository, RefreshTokenRepository, SecurityAudit, UserRepository,
 };
 use sqlx::postgres::PgPoolOptions;
 
@@ -114,39 +116,54 @@ async fn serve() {
         Arc<dyn RecurringSearchRepository>,
         // Security audit log (ADR-057).
         Arc<dyn SecurityAudit>,
+        // Email verification codes (ADR-062).
+        Arc<dyn EmailVerificationRepository>,
         // Single-leader gate for the background loop (ADR-053).
         Arc<dyn LeaderLock>,
     );
-    let (users, jobs, refresh_tokens, recurring, audit, leader): Repos = match &config.database_url
-    {
-        Some(url) => {
-            let pool = PgPoolOptions::new()
-                .max_connections(10)
-                .connect(url)
-                .await
-                .expect("failed to connect to PostgreSQL");
-            run_migrations(&pool)
-                .await
-                .expect("failed to run migrations");
-            tracing::info!("using PostgreSQL persistence");
-            (
-                Arc::new(PostgresUserRepository::new(pool.clone())),
-                Arc::new(PostgresJobRepository::new(pool.clone())),
-                Arc::new(PostgresRefreshTokenRepository::new(pool.clone())),
-                Arc::new(PostgresRecurringSearchRepository::new(pool.clone())),
-                Arc::new(PostgresSecurityAudit::new(pool.clone())),
-                Arc::new(PostgresLeaderLock::new(pool)),
-            )
-        }
-        None => (
-            Arc::new(InMemoryUserRepository::default()),
-            Arc::new(InMemoryJobRepository::default()),
-            Arc::new(InMemoryRefreshTokenRepository::default()),
-            Arc::new(InMemoryRecurringSearchRepository::default()),
-            Arc::new(InMemorySecurityAudit::default()),
-            // A single in-memory instance always leads.
-            Arc::new(NoopLeaderLock),
-        ),
+    let (users, jobs, refresh_tokens, recurring, audit, verifications, leader): Repos =
+        match &config.database_url {
+            Some(url) => {
+                let pool = PgPoolOptions::new()
+                    .max_connections(10)
+                    .connect(url)
+                    .await
+                    .expect("failed to connect to PostgreSQL");
+                run_migrations(&pool)
+                    .await
+                    .expect("failed to run migrations");
+                tracing::info!("using PostgreSQL persistence");
+                (
+                    Arc::new(PostgresUserRepository::new(pool.clone())),
+                    Arc::new(PostgresJobRepository::new(pool.clone())),
+                    Arc::new(PostgresRefreshTokenRepository::new(pool.clone())),
+                    Arc::new(PostgresRecurringSearchRepository::new(pool.clone())),
+                    Arc::new(PostgresSecurityAudit::new(pool.clone())),
+                    Arc::new(PostgresEmailVerificationRepository::new(pool.clone())),
+                    Arc::new(PostgresLeaderLock::new(pool)),
+                )
+            }
+            None => (
+                Arc::new(InMemoryUserRepository::default()),
+                Arc::new(InMemoryJobRepository::default()),
+                Arc::new(InMemoryRefreshTokenRepository::default()),
+                Arc::new(InMemoryRecurringSearchRepository::default()),
+                Arc::new(InMemorySecurityAudit::default()),
+                Arc::new(InMemoryEmailVerificationRepository::default()),
+                // A single in-memory instance always leads.
+                Arc::new(NoopLeaderLock),
+            ),
+        };
+
+    // Email transport (ADR-062): a real provider when one is configured, the
+    // logging stand-in otherwise. `AppConfig` has already refused to reach this
+    // line in production without a key.
+    let mailer: Arc<dyn EmailSender> = match &config.resend_api_key {
+        Some(key) => Arc::new(ResendEmailSender::new(
+            key.clone(),
+            config.email_from.clone(),
+        )),
+        None => Arc::new(DevEmailSender::default()),
     };
 
     // Background loop: the reaper (ADR-016), refresh-token purge (ADR-008)
@@ -162,6 +179,7 @@ async fn serve() {
         config.daily_search_quota,
     );
     let refresh_tokens_for_reaper = refresh_tokens.clone();
+    let verifications_for_reaper = verifications.clone();
     let audit_for_purge = audit.clone();
     // Security-event retention (ADR-057): 0 keeps events forever (no purge).
     let security_retention_days = config.security_event_retention_days;
@@ -191,6 +209,13 @@ async fn serve() {
             {
                 tracing::error!(error = %e, "refresh token purge failed");
             }
+            // Spent verification codes (ADR-062) age out on the same tick.
+            if let Err(e) = verifications_for_reaper
+                .delete_expired(chrono::Utc::now())
+                .await
+            {
+                tracing::error!(error = %e, "verification code purge failed");
+            }
             if security_retention_days > 0 {
                 let cutoff = chrono::Utc::now() - chrono::Duration::days(security_retention_days);
                 if let Err(e) = audit_for_purge.delete_before(cutoff).await {
@@ -208,6 +233,12 @@ async fn serve() {
         "login",
         config.rate_limits.redis_url.as_deref(),
     );
+    // Same size, its own budget and key namespace (ADR-062).
+    let verify_throttle = Limiter::per_minute(
+        config.rate_limits.login_per_minute,
+        "verify",
+        config.rate_limits.redis_url.as_deref(),
+    );
 
     let state = AppState::new(
         users,
@@ -222,6 +253,13 @@ async fn serve() {
         Arc::new(Argon2PasswordHasher),
         Arc::new(JwtTokenService::new(&config.jwt_secret, 15)),
         audit,
+        EmailVerificationSetup {
+            verifications: verifications.clone(),
+            mailer,
+            ttl_minutes: config.email_verification_ttl_minutes,
+            expose_codes: config.expose_verification_codes,
+            throttle: verify_throttle,
+        },
         login_throttle,
         config.internal_token,
         config.daily_search_quota,

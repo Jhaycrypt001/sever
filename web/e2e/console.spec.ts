@@ -12,15 +12,50 @@ function uniqueEmail() {
   return `e2e-${Date.now()}-${Math.floor(Math.random() * 1e6)}@test.dev`
 }
 
-async function register(page: Page, email: string) {
-  await page.goto('/console')
-  await page.getByRole('button', { name: 'No account? Create one' }).click()
+/**
+ * Fills the credentials form. Leaves the browser on whatever screen the
+ * submission produced — for registration that is the verification step.
+ */
+async function fillCredentials(page: Page, email: string, submit: string) {
   await page.getByLabel('Email').fill(email)
   // `exact` matters: the reveal toggle's accessible name is "Show password",
   // which a substring match also picks up.
   await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
-  await page.getByRole('button', { name: 'Create account' }).click()
+  await page.getByRole('button', { name: submit }).click()
+}
+
+/**
+ * Answers the emailed code (ADR-062/063).
+ *
+ * The compose stack runs without a mail provider, so the backend returns the
+ * code and the console pre-fills the box with it — which is exactly the state
+ * a person reaching for their inbox would reach manually. The notice is
+ * asserted because a silently empty box here would make every test below fail
+ * for an unrelated-looking reason.
+ */
+async function verifyCode(page: Page) {
+  await expect(
+    page.getByRole('heading', { name: 'Check your email' }),
+  ).toBeVisible()
+  await expect(page.getByTestId('verification-notice')).toContainText(
+    'No mail provider configured',
+  )
+  await expect(page.getByLabel('Verification code')).not.toHaveValue('')
+  await page.getByRole('button', { name: 'Verify and continue' }).click()
+}
+
+async function register(page: Page, email: string) {
+  await page.goto('/console')
+  await page.getByRole('button', { name: 'No account? Create one' }).click()
+  await fillCredentials(page, email, 'Create account')
+  await verifyCode(page)
   await expect(page.getByLabel('Wallet to scan')).toBeVisible()
+}
+
+/** The full two-factor sign-in of ADR-063: password, then the emailed code. */
+async function signIn(page: Page, email: string) {
+  await fillCredentials(page, email, 'Sign in')
+  await verifyCode(page)
 }
 
 // The two modes differ in whether the run may write to the chain, not in
@@ -229,11 +264,8 @@ test('a returning user signs back in and finds the previous scans', async ({
   // signing back in must list the scan launched above.
   await page.context().clearCookies()
   await page.goto('/console')
-  await page.getByLabel('Email').fill(email)
-  // `exact` matters: the reveal toggle's accessible name is "Show password",
-  // which a substring match also picks up.
-  await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
-  await page.getByRole('button', { name: 'Sign in' }).click()
+  // Verified or not, a sign-in always takes a second factor (ADR-063).
+  await signIn(page, email)
 
   await expect(page.getByTestId('scan-detail')).toBeVisible()
   await expect(page.getByTestId('run-status')).toContainText('Complete')
@@ -259,11 +291,128 @@ test('the public page hands a pasted address to the console', async ({
 
   const email = uniqueEmail()
   await page.getByRole('button', { name: 'No account? Create one' }).click()
-  await page.getByLabel('Email').fill(email)
-  // `exact` matters: the reveal toggle's accessible name is "Show password",
-  // which a substring match also picks up.
-  await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
-  await page.getByRole('button', { name: 'Create account' }).click()
+  await fillCredentials(page, email, 'Create account')
+  await verifyCode(page)
 
+  // The pasted address survives registration *and* the verification detour.
   await expect(page.getByLabel('Wallet to scan')).toHaveValue(WALLET)
+})
+
+test('a password alone never opens a session, before or after verification', async ({
+  page,
+}) => {
+  // ADR-063: the password is one factor of two. Abandoning the code screen and
+  // coming back with correct credentials has to land on the code screen again —
+  // telling someone their password is wrong when it is not is how people
+  // conclude the product is broken.
+  const email = uniqueEmail()
+  await page.goto('/console')
+  await page.getByRole('button', { name: 'No account? Create one' }).click()
+  await fillCredentials(page, email, 'Create account')
+  await expect(
+    page.getByRole('heading', { name: 'Check your email' }),
+  ).toBeVisible()
+
+  // Walk away from the code and try the front door with correct credentials.
+  await page.getByRole('button', { name: 'Use a different address' }).click()
+  await fillCredentials(page, email, 'Sign in')
+
+  await expect(
+    page.getByRole('heading', { name: 'Check your email' }),
+  ).toBeVisible()
+  // No error was shown on the way: the password was right.
+  await expect(page.getByTestId('auth-error')).toHaveCount(0)
+
+  // The code that arrived with that sign-in attempt works.
+  await verifyCode(page)
+  await expect(page.getByLabel('Wallet to scan')).toBeVisible()
+})
+
+test('a wrong verification code is refused and the box stays usable', async ({
+  page,
+}) => {
+  const email = uniqueEmail()
+  await page.goto('/console')
+  await page.getByRole('button', { name: 'No account? Create one' }).click()
+  await fillCredentials(page, email, 'Create account')
+  await expect(
+    page.getByRole('heading', { name: 'Check your email' }),
+  ).toBeVisible()
+
+  const box = page.getByLabel('Verification code')
+  const real = await box.inputValue()
+  const wrong = real === '000000' ? '111111' : '000000'
+
+  await box.fill(wrong)
+  await page.getByRole('button', { name: 'Verify and continue' }).click()
+  await expect(page.getByTestId('auth-error')).toContainText(
+    'invalid or expired',
+  )
+  // Still on the code step, and still able to try the real one.
+  await box.fill(real)
+  await page.getByRole('button', { name: 'Verify and continue' }).click()
+  await expect(page.getByLabel('Wallet to scan')).toBeVisible()
+})
+
+test('a forgotten password can be reset from the sign-in screen', async ({
+  page,
+}) => {
+  // ADR-063: recovery ends signed in, because by then both factors have been
+  // proved — the mailed code, and the password just chosen.
+  const email = uniqueEmail()
+  await register(page, email)
+  await page.context().clearCookies()
+  await page.goto('/console')
+
+  await page.getByRole('button', { name: 'Forgot password?' }).click()
+  await page.getByLabel('Email').fill(email)
+  await page.getByRole('button', { name: 'Send reset code' }).click()
+
+  await expect(
+    page.getByRole('heading', { name: 'Choose a new password' }),
+  ).toBeVisible()
+  await expect(page.getByTestId('verification-notice')).toContainText(
+    'No mail provider configured',
+  )
+  await expect(page.getByLabel('Verification code')).not.toHaveValue('')
+
+  const NEW_PASSWORD = 'a-brand-new-e2e-password'
+  await page.getByLabel('New password', { exact: true }).fill(NEW_PASSWORD)
+  await page.getByRole('button', { name: 'Set password and sign in' }).click()
+
+  // Straight into the console, no second sign-in.
+  await expect(page.getByLabel('Wallet to scan')).toBeVisible()
+
+  // And the new password is the one that works from now on.
+  await page.context().clearCookies()
+  await page.goto('/console')
+  await page.getByLabel('Email').fill(email)
+  await page.getByLabel('Password', { exact: true }).fill(NEW_PASSWORD)
+  await page.getByRole('button', { name: 'Sign in' }).click()
+  await verifyCode(page)
+  await expect(page.getByLabel('Wallet to scan')).toBeVisible()
+})
+
+test('the old password stops working after a reset', async ({ page }) => {
+  const email = uniqueEmail()
+  await register(page, email)
+  await page.context().clearCookies()
+  await page.goto('/console')
+
+  await page.getByRole('button', { name: 'Forgot password?' }).click()
+  await page.getByLabel('Email').fill(email)
+  await page.getByRole('button', { name: 'Send reset code' }).click()
+  await page
+    .getByLabel('New password', { exact: true })
+    .fill('another-new-e2e-password')
+  await page.getByRole('button', { name: 'Set password and sign in' }).click()
+  await expect(page.getByLabel('Wallet to scan')).toBeVisible()
+
+  await page.context().clearCookies()
+  await page.goto('/console')
+  // PASSWORD is what the account was registered with, and it is now stale.
+  await fillCredentials(page, email, 'Sign in')
+  await expect(page.getByTestId('auth-error')).toContainText(
+    'invalid credentials',
+  )
 })

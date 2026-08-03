@@ -17,6 +17,9 @@ const KIND_STYLE: Record<string, string> = {
   revoke: 'text-emerald-200',
   ask: 'text-amber-200',
   finish: 'text-white/45',
+  // A chain that could not be scanned (ADR-064). Red, not neutral: it is the
+  // one step kind that means the run covered less than it was asked to.
+  degraded: 'text-red-300',
 }
 
 export function Journal({ steps }: { steps: AgentStep[] }) {

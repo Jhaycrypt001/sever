@@ -68,7 +68,7 @@ class RecordingRevoker:
         self._fail_for = fail_for or set()
         self.revoked: list[str] = []
 
-    def revoke(self, finding: ApprovalFinding) -> ApprovalFinding:
+    def revoke(self, finding: ApprovalFinding, wallet_address: str) -> ApprovalFinding:
         from dataclasses import replace
 
         self.revoked.append(finding.spender_address)
@@ -366,16 +366,27 @@ def test_the_delta_report_does_not_reuse_a_revocation_seq() -> None:
 
 
 def test_scan_failure_reports_and_propagates() -> None:
+    """Every chain unreachable still fails the job (ADR-064 kept this).
+
+    What changed is *when*: a failing chain no longer aborts the graph on the
+    spot, so the policy gets to try the others. The run fails once it turns
+    out nothing was scanned — with the cause attached, because the bare
+    sentence "no chain could be scanned" is unactionable in a log.
+    """
+
     class ExplodingSource:
         def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
             raise RuntimeError("GoPlus down")
 
-    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r")])
+    policy = ScriptedPolicy(
+        [ScanAction(chain_id="1", reason="r"), FinishAction(reason="nothing worked")]
+    )
     sink = RecordingSink()
 
     with pytest.raises(Exception, match="GoPlus down"):
         run("job-4", "goal", ExplodingSource(), policy, sink, RecordingReporter(), max_steps=5)
-    assert sink.failures == [("job-4", "GoPlus down")] or sink.failures[-1][0] == "job-4"
+    assert sink.failures and sink.failures[-1][0] == "job-4"
+    assert sink.delivered == []
 
 
 # ---------------------------------------------------------------- HITL (ADR-032/046)
@@ -467,3 +478,68 @@ def test_ask_after_an_answer_degrades_to_finish() -> None:
     assert outcome is not None and len(outcome) == 1
     assert clarifier.questions == []
     assert reporter.steps[-1].kind is AgentStepKind.FINISH
+
+
+# ---------------------------------------------------------------- chain resilience (ADR-064)
+
+
+class FlakySource:
+    """Fails on the named chains, returns canned approvals for the rest."""
+
+    def __init__(
+        self, by_chain: dict[str, list[RawApproval]], failing: dict[str, Exception]
+    ) -> None:
+        self._by_chain = by_chain
+        self._failing = failing
+        self.chain_ids: list[str] = []
+
+    def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
+        self.chain_ids.append(chain_id)
+        if chain_id in self._failing:
+            raise self._failing[chain_id]
+        return self._by_chain.get(chain_id, [])
+
+
+def test_a_failing_chain_becomes_a_degraded_step_and_the_graph_continues() -> None:
+    # ADR-064, on the *default* orchestrator: a provider outage on one chain
+    # used to abort the whole graph and discard the other chains' findings.
+    source = FlakySource(
+        {"1": [approval("a")]},
+        {"8453": RuntimeError("GoPlus error (code 4029): rate limited")},
+    )
+    policy = ScriptedPolicy(
+        [
+            ScanAction(chain_id="8453", reason="base first"),
+            ScanAction(chain_id="1", reason="then ethereum"),
+            FinishAction(reason="done"),
+        ]
+    )
+    sink, reporter = RecordingSink(), RecordingReporter()
+
+    results = run("job-1", "goal", source, policy, sink, reporter, max_steps=5)
+
+    assert [f.spender_address for f in results] == ["a"]
+    kinds = [s.kind for s in reporter.steps]
+    assert AgentStepKind.DEGRADED in kinds
+    degraded = next(s for s in reporter.steps if s.kind is AgentStepKind.DEGRADED)
+    assert degraded.detail == "8453"
+    assert "rate limited" in degraded.reason
+    assert sink.delivered == [("job-1", 1)]
+
+
+def test_every_chain_failing_fails_the_graph_rather_than_delivering_nothing() -> None:
+    source = FlakySource({}, {"1": RuntimeError("down"), "8453": RuntimeError("down")})
+    policy = ScriptedPolicy(
+        [
+            ScanAction(chain_id="1", reason="ethereum"),
+            ScanAction(chain_id="8453", reason="base"),
+            FinishAction(reason="done"),
+        ]
+    )
+    sink = RecordingSink()
+
+    with pytest.raises(RuntimeError, match="no chain could be scanned"):
+        run("job-1", "goal", source, policy, sink, RecordingReporter(), max_steps=5)
+
+    assert sink.delivered == []
+    assert sink.failures

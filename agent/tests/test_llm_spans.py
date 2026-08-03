@@ -14,6 +14,10 @@ from aiagent.adapters.keeperhub import KeeperHubApprovalRevoker
 from aiagent.adapters.llm import ActionReply, ExplanationReply, LlmAgentPolicy, LlmThreatIntel
 from aiagent.domain.models import ApprovalFinding, RawApproval, RiskTier
 
+#: The wallet the KeeperHub key executes as (ADR-065): revocation is refused
+#: for any other, so this test must present a matching one.
+WALLET = "0xe13ed979bc6b23d6d9608939051e9488e9f304bf"
+
 
 class FakeChat:
     """Structured-output fake carrying usage_metadata, so the span records real
@@ -99,6 +103,10 @@ def test_keeperhub_revoke_span_carries_the_finding_and_outcome(
     exporter: InMemorySpanExporter,
 ) -> None:
     exporter.clear()
+    # ADR-065: the adapter reads its delegated wallet before executing.
+    respx.get("https://app.keeperhub.com/api/user").mock(
+        return_value=httpx.Response(200, json={"walletAddress": WALLET})
+    )
     respx.post("https://app.keeperhub.com/api/execute/contract-call").mock(
         return_value=httpx.Response(200, json={"executionId": "exec-1", "status": "pending"})
     )
@@ -119,7 +127,8 @@ def test_keeperhub_revoke_span_carries_the_finding_and_outcome(
             spender_address="0xbad",
             approved_amount="Unlimited",
             tier=RiskTier.DANGEROUS,
-        )
+        ),
+        WALLET,
     )
 
     attrs = _attrs(exporter, "keeperhub revoke")

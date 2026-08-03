@@ -135,7 +135,7 @@ def test_fake_revoker_always_succeeds_with_a_synthetic_tx_hash() -> None:
     )
     dangerous = next(f for f in findings if f.tier == RiskTier.DANGEROUS)
 
-    revoked = FakeApprovalRevoker().revoke(dangerous)
+    revoked = FakeApprovalRevoker().revoke(dangerous, "0xwallet")
 
     assert revoked.revocation_status == RevocationStatus.REVOKED
     assert revoked.revocation_tx_hash is not None

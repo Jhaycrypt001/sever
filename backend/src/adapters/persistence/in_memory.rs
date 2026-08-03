@@ -6,12 +6,12 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::domain::ports::{
-    JobRepository, PortError, RecurringSearchRepository, RefreshTokenRepository, SecurityAudit,
-    UserRepository,
+    EmailVerificationRepository, JobRepository, PortError, RecurringSearchRepository,
+    RefreshTokenRepository, SecurityAudit, UserRepository,
 };
 use crate::domain::{
-    AgentStep, ApprovalFinding, JobStatus, JobUsage, RecurringSearch, RefreshToken, ScanJob,
-    SecurityEvent, User,
+    AgentStep, ApprovalFinding, CodePurpose, EmailVerification, JobStatus, JobUsage,
+    RecurringSearch, RefreshToken, ScanJob, SecurityEvent, User,
 };
 
 #[derive(Default)]
@@ -34,6 +34,112 @@ impl UserRepository for InMemoryUserRepository {
             .values()
             .find(|u| u.email == email)
             .cloned())
+    }
+
+    async fn mark_email_verified(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), PortError> {
+        if let Some(user) = self.users.lock().unwrap().get_mut(&id) {
+            // First verification wins, so a replay cannot move the timestamp.
+            user.email_verified_at.get_or_insert(at);
+        }
+        Ok(())
+    }
+
+    async fn update_password_hash(&self, id: Uuid, hash: &str) -> Result<(), PortError> {
+        if let Some(user) = self.users.lock().unwrap().get_mut(&id) {
+            user.password_hash = hash.to_string();
+        }
+        Ok(())
+    }
+}
+
+/// Verification codes (ADR-062), in memory.
+#[derive(Default)]
+pub struct InMemoryEmailVerificationRepository {
+    codes: Mutex<HashMap<Uuid, EmailVerification>>,
+}
+
+impl InMemoryEmailVerificationRepository {
+    /// Backdates the user's live code so expiry is testable without waiting out
+    /// a real TTL. Test-only affordance on the in-memory double; the PostgreSQL
+    /// adapter has no equivalent and needs none.
+    pub async fn expire_for_test(&self, user_id: Uuid, purpose: CodePurpose, at: DateTime<Utc>) {
+        let mut codes = self.codes.lock().unwrap();
+        if let Some(id) = codes
+            .values()
+            .find(|c| c.user_id == user_id && c.purpose == purpose && !c.is_consumed())
+            .map(|c| c.id)
+        {
+            codes.get_mut(&id).unwrap().expires_at = at;
+        }
+    }
+}
+
+#[async_trait]
+impl EmailVerificationRepository for InMemoryEmailVerificationRepository {
+    async fn insert(&self, verification: &EmailVerification) -> Result<(), PortError> {
+        let mut codes = self.codes.lock().unwrap();
+        // Supersede whatever the user had *of this purpose*: exactly one live
+        // code per purpose at a time (ADR-063).
+        for existing in codes.values_mut() {
+            if existing.user_id == verification.user_id
+                && existing.purpose == verification.purpose
+                && !existing.is_consumed()
+            {
+                existing.consumed_at = Some(verification.created_at);
+            }
+        }
+        codes.insert(verification.id, verification.clone());
+        Ok(())
+    }
+
+    async fn active_for_user(
+        &self,
+        user_id: Uuid,
+        purpose: CodePurpose,
+    ) -> Result<Option<EmailVerification>, PortError> {
+        Ok(self
+            .codes
+            .lock()
+            .unwrap()
+            .values()
+            .find(|c| c.user_id == user_id && c.purpose == purpose && !c.is_consumed())
+            .cloned())
+    }
+
+    async fn find_by_hash(
+        &self,
+        user_id: Uuid,
+        purpose: CodePurpose,
+        code_hash: &str,
+    ) -> Result<Option<EmailVerification>, PortError> {
+        Ok(self
+            .codes
+            .lock()
+            .unwrap()
+            .values()
+            .find(|c| c.user_id == user_id && c.purpose == purpose && c.code_hash == code_hash)
+            .cloned())
+    }
+
+    async fn record_attempt(&self, id: Uuid) -> Result<(), PortError> {
+        if let Some(code) = self.codes.lock().unwrap().get_mut(&id) {
+            code.attempts += 1;
+        }
+        Ok(())
+    }
+
+    async fn mark_consumed(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), PortError> {
+        if let Some(code) = self.codes.lock().unwrap().get_mut(&id) {
+            code.consumed_at.get_or_insert(at);
+        }
+        Ok(())
+    }
+
+    async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, PortError> {
+        let mut codes = self.codes.lock().unwrap();
+        let before = codes.len();
+        codes.retain(|_, c| c.expires_at > now);
+        Ok((before - codes.len()) as u64)
     }
 }
 
@@ -68,6 +174,14 @@ impl RefreshTokenRepository for InMemoryRefreshTokenRepository {
 
     async fn delete(&self, id: Uuid) -> Result<(), PortError> {
         self.tokens.lock().unwrap().remove(&id);
+        Ok(())
+    }
+
+    async fn delete_for_user(&self, user_id: Uuid) -> Result<(), PortError> {
+        self.tokens
+            .lock()
+            .unwrap()
+            .retain(|_, t| t.user_id != user_id);
         Ok(())
     }
 

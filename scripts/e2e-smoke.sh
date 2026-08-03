@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # End-to-end smoke test (ADR-021) against the full compose stack running with
 # AGENT_PROVIDERS=fake. Exercises the real user journey through the Next.js
-# server, which proxies /api to the backend (ADR-061): register -> login ->
-# scan a wallet -> worker classifies and revokes -> findings come back sorted
-# most-dangerous-first.
+# server, which proxies /api to the backend (ADR-061): register -> verify the
+# emailed code (ADR-062) -> sign in with the second factor and recover a
+# forgotten password (ADR-063) -> scan a wallet -> worker classifies and
+# revokes -> findings come back sorted most-dangerous-first.
 #
 # The fake approval source returns the whole ADR-058 risk cascade per chain:
 # a malicious spender (DANGEROUS, auto-revoked), an unverified one (WATCH) and
@@ -56,17 +57,62 @@ done
 curl -sf "$BASE_URL" -o /dev/null || fail "web unreachable at $BASE_URL"
 
 say "register $EMAIL"
-curl -sf -X POST "$BASE_URL/api/auth/register" \
+REGISTERED=$(curl -sf -X POST "$BASE_URL/api/auth/register" \
   -H 'content-type: application/json' \
-  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" >/dev/null \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}") \
   || fail "register"
 
-say "login"
+# Registration issues no session (ADR-062) — answering the emailed code does.
+# The compose stack runs without RESEND_API_KEY, so the backend hands the code
+# back instead of sending it. With a real key configured this step cannot
+# work, and neither can this script: the code would be in an inbox.
+CODE=$(json_get "$REGISTERED" 'data["verification_code"] or ""')
+[ -n "$CODE" ] || fail "no verification code in the register response — is RESEND_API_KEY set on the backend?"
+
+say "verify the address with the emailed code"
+SESSION=$(curl -sf -X POST "$BASE_URL/api/auth/verify" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"code\":\"$CODE\"}") || fail "verify"
+TOKEN=$(json_get "$SESSION" 'data["access_token"]')
+[ -n "$TOKEN" ] || fail "no access token in verify response"
+
+say "a later sign-in takes the password AND a second code (ADR-063)"
 LOGIN=$(curl -sf -X POST "$BASE_URL/api/auth/login" \
   -H 'content-type: application/json' \
   -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}") || fail "login"
-TOKEN=$(json_get "$LOGIN" 'data["access_token"]')
-[ -n "$TOKEN" ] || fail "no access token in login response"
+# Login answers 202 with a code, never a session: the password is one factor.
+[ -z "$(json_get "$LOGIN" 'data.get("access_token") or ""')" ] \
+  || fail "login handed out a session without the second factor"
+LOGIN_CODE=$(json_get "$LOGIN" 'data["verification_code"] or ""')
+[ -n "$LOGIN_CODE" ] || fail "no sign-in code in the login response"
+
+curl -sf -X POST "$BASE_URL/api/auth/verify" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"code\":\"$LOGIN_CODE\"}" >/dev/null \
+  || fail "second-factor verify"
+
+say "a forgotten password can be recovered (ADR-063)"
+NEW_PASSWORD="e2e-recovered-password"
+FORGOT=$(curl -sf -X POST "$BASE_URL/api/auth/password/forgot" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL\"}") || fail "forgot password"
+RESET_CODE=$(json_get "$FORGOT" 'data["verification_code"] or ""')
+[ -n "$RESET_CODE" ] || fail "no reset code in the forgot-password response"
+
+curl -sf -X POST "$BASE_URL/api/auth/password/reset" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"code\":\"$RESET_CODE\",\"password\":\"$NEW_PASSWORD\"}" \
+  >/dev/null || fail "password reset"
+
+# The old password is dead, the new one is accepted.
+curl -sf -o /dev/null -X POST "$BASE_URL/api/auth/login" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$PASSWORD\"}" \
+  && fail "the old password still works after a reset"
+curl -sf -X POST "$BASE_URL/api/auth/login" \
+  -H 'content-type: application/json' \
+  -d "{\"email\":\"$EMAIL\",\"password\":\"$NEW_PASSWORD\"}" >/dev/null \
+  || fail "the new password does not work after a reset"
 
 say "launch a report-only scan (workflow mode — read-only by design)"
 LAUNCH=$(auth -X POST "$BASE_URL/api/searches" -H 'content-type: application/json' \

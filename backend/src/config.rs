@@ -29,6 +29,10 @@ pub const REQUIRED_IN_PRODUCTION: &[&str] = &[
     "INTERNAL_API_TOKEN",
     "DATABASE_URL",
     "AGENT_API_URL",
+    // ADR-062: with no mail provider, registration creates accounts that can
+    // never be verified and therefore never signed into. Fail at boot instead.
+    "RESEND_API_KEY",
+    "EMAIL_FROM",
 ];
 
 use crate::adapters::http::RateLimitConfig;
@@ -60,6 +64,21 @@ pub struct AppConfig {
     /// are purged by the background loop. Kept generous so an incident stays
     /// investigable; 0 disables the purge (keep forever).
     pub security_event_retention_days: i64,
+    /// Resend API key (ADR-062). None selects the development mailer, which
+    /// logs the code instead of sending it.
+    pub resend_api_key: Option<String>,
+    /// The verified From address, e.g. `Approval Firewall <no-reply@x.dev>`.
+    pub email_from: String,
+    /// Lifetime of a verification code.
+    pub email_verification_ttl_minutes: i64,
+    /// Whether the API may return verification codes in its responses.
+    ///
+    /// True only when no email provider is configured *and* this is not
+    /// production — the same rule ADR-059 applies to simulated revocations: a
+    /// development affordance that would be a credential leak in production is
+    /// forced off there rather than merely defaulted off, so no combination of
+    /// environment variables can turn it back on.
+    pub expose_verification_codes: bool,
     /// Degraded-mode notices to log once tracing is up (dev fallbacks, ADR-013).
     pub warnings: Vec<&'static str>,
 }
@@ -76,7 +95,8 @@ impl AppConfig {
     where
         F: Fn(&str) -> Option<String>,
     {
-        if lookup("APP_ENV").as_deref() == Some("production") {
+        let is_production = lookup("APP_ENV").as_deref() == Some("production");
+        if is_production {
             let missing = missing_required(REQUIRED_IN_PRODUCTION, &lookup);
             if !missing.is_empty() {
                 return Err(missing);
@@ -100,6 +120,19 @@ impl AppConfig {
         if database_url.is_none() {
             warnings
                 .push("DATABASE_URL not set, using in-memory persistence (data lost on restart)");
+        }
+
+        // Email verification (ADR-062). Without a provider the backend still
+        // starts — it logs codes instead of mailing them — but it says so
+        // loudly, and in production it does not start at all: an account that
+        // can never be verified is worse than a refusal at boot.
+        let resend_api_key = get("RESEND_API_KEY");
+        let expose_verification_codes = resend_api_key.is_none() && !is_production;
+        if resend_api_key.is_none() {
+            warnings.push(
+                "RESEND_API_KEY not set, verification codes are logged and returned by the \
+                 API instead of e-mailed (development only)",
+            );
         }
 
         let internal_token = get("INTERNAL_API_TOKEN").unwrap_or_else(|| "change-me".into());
@@ -138,6 +171,14 @@ impl AppConfig {
             digest_allow_private_webhooks: get("DIGEST_ALLOW_PRIVATE_WEBHOOKS")
                 .is_some_and(|v| v == "true"),
             security_event_retention_days: i64::from(get_u32("SECURITY_EVENT_RETENTION_DAYS", 90)),
+            resend_api_key,
+            email_from: get("EMAIL_FROM")
+                .unwrap_or_else(|| "Approval Firewall <onboarding@resend.dev>".into()),
+            email_verification_ttl_minutes: i64::from(get_u32(
+                "EMAIL_VERIFICATION_TTL_MINUTES",
+                10,
+            )),
+            expose_verification_codes,
             warnings,
         })
     }
@@ -227,7 +268,46 @@ mod tests {
         assert_eq!(config.rate_limits.api_per_minute, 120);
         assert_eq!(config.refresh_token_days, 30);
         assert_eq!(config.bind_addr, "0.0.0.0:8000");
-        assert_eq!(config.warnings.len(), 3); // jwt, agent url, database
+        assert_eq!(config.warnings.len(), 4); // jwt, agent url, database, mailer
+        assert_eq!(config.email_verification_ttl_minutes, 10);
+    }
+
+    #[test]
+    fn without_a_mail_provider_development_exposes_codes_and_says_so() {
+        // ADR-062: no mailbox needed to work on the console locally, but the
+        // degraded mode has to be impossible to mistake for a working one.
+        let config = AppConfig::from_lookup(lookup_from(&[])).unwrap();
+        assert!(config.expose_verification_codes);
+        assert!(config.resend_api_key.is_none());
+        assert!(config
+            .warnings
+            .iter()
+            .any(|w| w.contains("RESEND_API_KEY not set")));
+    }
+
+    #[test]
+    fn a_configured_mail_provider_never_exposes_codes() {
+        let config =
+            AppConfig::from_lookup(lookup_from(&[("RESEND_API_KEY", "re_live_key")])).unwrap();
+        assert!(!config.expose_verification_codes);
+    }
+
+    #[test]
+    fn production_refuses_to_start_without_a_mail_provider() {
+        // The alternative is an account nobody can ever sign into (ADR-062).
+        let err = AppConfig::from_lookup(lookup_from(&[
+            ("APP_ENV", "production"),
+            ("JWT_SECRET", "the-quick-brown-fox-jumps-over-the-lazy-dog"),
+            (
+                "INTERNAL_API_TOKEN",
+                "pack-my-box-with-five-dozen-liquor-jugs-ok",
+            ),
+            ("DATABASE_URL", "postgres://x"),
+            ("AGENT_API_URL", "http://agent:8001"),
+        ]))
+        .unwrap_err();
+
+        assert_eq!(err, vec!["RESEND_API_KEY", "EMAIL_FROM"]);
     }
 
     #[test]
@@ -239,12 +319,15 @@ mod tests {
             ("DAILY_SEARCH_QUOTA", "5"),
             ("RATE_LIMIT_AUTH_PER_MINUTE", "not-a-number"),
             ("BIND_ADDR", "127.0.0.1:9000"),
+            ("RESEND_API_KEY", "re_live_key"),
+            ("EMAIL_VERIFICATION_TTL_MINUTES", "30"),
         ]))
         .unwrap();
 
         assert_eq!(config.daily_search_quota, 5);
         assert_eq!(config.rate_limits.auth_per_minute, 10); // fallback on parse error
         assert_eq!(config.bind_addr, "127.0.0.1:9000");
+        assert_eq!(config.email_verification_ttl_minutes, 30);
         assert!(config.warnings.is_empty());
     }
 
@@ -259,7 +342,13 @@ mod tests {
 
         assert_eq!(
             err,
-            vec!["INTERNAL_API_TOKEN", "DATABASE_URL", "AGENT_API_URL"]
+            vec![
+                "INTERNAL_API_TOKEN",
+                "DATABASE_URL",
+                "AGENT_API_URL",
+                "RESEND_API_KEY",
+                "EMAIL_FROM"
+            ]
         );
     }
 
@@ -274,8 +363,12 @@ mod tests {
             ),
             ("DATABASE_URL", "postgres://x"),
             ("AGENT_API_URL", "http://agent:8001"),
+            ("RESEND_API_KEY", "re_live_key"),
+            ("EMAIL_FROM", "Approval Firewall <no-reply@example.dev>"),
         ]))
         .unwrap();
         assert!(config.warnings.is_empty());
+        // Whatever else is configured, production never hands out a code.
+        assert!(!config.expose_verification_codes);
     }
 }

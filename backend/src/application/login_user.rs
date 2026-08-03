@@ -1,9 +1,7 @@
 use std::sync::Arc;
 
-use crate::domain::ports::{
-    PasswordHasher, PortError, RefreshTokenRepository, TokenService, UserRepository,
-};
-use crate::domain::RefreshToken;
+use crate::domain::ports::{PasswordHasher, PortError, UserRepository};
+use crate::domain::User;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoginError {
@@ -13,40 +11,25 @@ pub enum LoginError {
     Infrastructure(#[from] PortError),
 }
 
-/// What a successful authentication hands back (ADR-008): a short-lived JWT
-/// for the Authorization header and a single-use refresh token for the cookie.
-#[derive(Debug)]
-pub struct SessionTokens {
-    pub access_token: String,
-    pub refresh_token: String,
-}
-
+/// Checks a password. **Does not sign anyone in** (ADR-063).
+///
+/// Every sign-in takes two factors: the password, and a code mailed to the
+/// address. This use case owns the first one only; it returns the account so
+/// the caller can send that account its code. `SessionIssuer` is reached
+/// exclusively through `ConfirmEmailVerification`, which means there is one
+/// place in the codebase where a session can come into existence, and it is
+/// downstream of the code.
 pub struct LoginUser {
     users: Arc<dyn UserRepository>,
     hasher: Arc<dyn PasswordHasher>,
-    tokens: Arc<dyn TokenService>,
-    refresh_tokens: Arc<dyn RefreshTokenRepository>,
-    refresh_ttl_days: i64,
 }
 
 impl LoginUser {
-    pub fn new(
-        users: Arc<dyn UserRepository>,
-        hasher: Arc<dyn PasswordHasher>,
-        tokens: Arc<dyn TokenService>,
-        refresh_tokens: Arc<dyn RefreshTokenRepository>,
-        refresh_ttl_days: i64,
-    ) -> Self {
-        Self {
-            users,
-            hasher,
-            tokens,
-            refresh_tokens,
-            refresh_ttl_days,
-        }
+    pub fn new(users: Arc<dyn UserRepository>, hasher: Arc<dyn PasswordHasher>) -> Self {
+        Self { users, hasher }
     }
 
-    pub async fn execute(&self, email: &str, password: &str) -> Result<SessionTokens, LoginError> {
+    pub async fn execute(&self, email: &str, password: &str) -> Result<User, LoginError> {
         let email = email.trim().to_lowercase();
         let user = self
             .users
@@ -56,23 +39,18 @@ impl LoginUser {
         if !self.hasher.verify(password, &user.password_hash) {
             return Err(LoginError::InvalidCredentials);
         }
-
-        let (record, plaintext) = RefreshToken::issue(user.id, self.refresh_ttl_days);
-        self.refresh_tokens.insert(&record).await?;
-        Ok(SessionTokens {
-            access_token: self.tokens.issue(user.id)?,
-            refresh_token: plaintext,
-        })
+        // Whether the address was verified before does not change the answer:
+        // both cases mail a code and land on the same screen. That is also why
+        // login can no longer be used to ask "is this address registered?".
+        Ok(user)
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::adapters::persistence::in_memory::{
-        InMemoryRefreshTokenRepository, InMemoryUserRepository,
-    };
-    use crate::domain::User;
+    use crate::adapters::persistence::in_memory::InMemoryUserRepository;
+    use crate::domain::ports::TokenService;
     use uuid::Uuid;
 
     pub(crate) struct FakeHasher;
@@ -97,49 +75,59 @@ mod tests {
         }
     }
 
-    async fn login_with_user() -> (LoginUser, Arc<InMemoryRefreshTokenRepository>, User) {
+    /// A user whose address has already been verified — the ordinary case.
+    pub(crate) fn verified(email: &str) -> User {
+        let mut user = User::new(email.into(), "hashed:good-password".into());
+        user.email_verified_at = Some(chrono::Utc::now());
+        user
+    }
+
+    async fn login_for(user: User) -> (LoginUser, User) {
         let users = Arc::new(InMemoryUserRepository::default());
-        let refresh = Arc::new(InMemoryRefreshTokenRepository::default());
-        let user = User::new("a@b.com".into(), "hashed:good-password".into());
         users.insert(&user).await.unwrap();
-        (
-            LoginUser::new(
-                users,
-                Arc::new(FakeHasher),
-                Arc::new(FakeTokens),
-                refresh.clone(),
-                30,
-            ),
-            refresh,
-            user,
-        )
+        (LoginUser::new(users, Arc::new(FakeHasher)), user)
+    }
+
+    async fn login_with_user() -> (LoginUser, User) {
+        login_for(verified("a@b.com")).await
     }
 
     #[tokio::test]
-    async fn issues_both_tokens_and_persists_the_refresh_hash() {
-        let (login, refresh_repo, user) = login_with_user().await;
+    async fn a_correct_password_returns_the_account_and_no_session() {
+        // ADR-063: the password is one factor of two. Sessions are issued by
+        // `ConfirmEmailVerification` alone, downstream of the emailed code —
+        // this use case has no access to a `SessionIssuer` at all, which is
+        // what makes "login cannot sign you in" a compile-time property.
+        let (login, user) = login_with_user().await;
 
-        let tokens = login.execute("a@b.com", "good-password").await.unwrap();
+        let returned = login.execute("a@b.com", "good-password").await.unwrap();
 
-        assert_eq!(tokens.access_token, format!("token-for:{}", user.id));
-        let stored = refresh_repo
-            .find_by_hash(&RefreshToken::hash(&tokens.refresh_token))
-            .await
-            .unwrap()
-            .expect("refresh token must be persisted hashed");
-        assert_eq!(stored.user_id, user.id);
+        assert_eq!(returned.id, user.id);
+    }
+
+    #[tokio::test]
+    async fn an_unverified_account_passes_the_password_check_like_any_other() {
+        // Both cases go on to be mailed a code, so login must not branch on
+        // verification — branching is what made it an enumeration oracle.
+        let (login, user) =
+            login_for(User::new("u@b.com".into(), "hashed:good-password".into())).await;
+
+        let returned = login.execute("u@b.com", "good-password").await.unwrap();
+
+        assert_eq!(returned.id, user.id);
+        assert!(!returned.is_verified());
     }
 
     #[tokio::test]
     async fn rejects_wrong_password() {
-        let (login, _, _) = login_with_user().await;
+        let (login, _) = login_with_user().await;
         let err = login.execute("a@b.com", "wrong").await.unwrap_err();
         assert!(matches!(err, LoginError::InvalidCredentials));
     }
 
     #[tokio::test]
     async fn rejects_unknown_email() {
-        let (login, _, _) = login_with_user().await;
+        let (login, _) = login_with_user().await;
         let err = login
             .execute("nobody@b.com", "good-password")
             .await

@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::{
-    AgentStep, ApprovalFinding, JobUsage, RecurringSearch, RefreshToken, ScanJob, SecurityEvent,
-    User,
+    AgentStep, ApprovalFinding, CodePurpose, EmailVerification, JobUsage, RecurringSearch,
+    RefreshToken, ScanJob, SecurityEvent, User,
 };
 
 /// Infrastructure failure surfaced through a port (DB down, network error...).
@@ -19,6 +19,72 @@ pub struct PortError(pub String);
 pub trait UserRepository: Send + Sync {
     async fn insert(&self, user: &User) -> Result<(), PortError>;
     async fn find_by_email(&self, email: &str) -> Result<Option<User>, PortError>;
+    /// Records that the address behind the account answered its code (ADR-062).
+    /// Idempotent: verifying an already-verified account is a no-op, not an
+    /// error, because a double-submitted form must not fail.
+    async fn mark_email_verified(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), PortError>;
+    /// Replaces the stored password hash (ADR-063, account recovery).
+    async fn update_password_hash(&self, id: Uuid, hash: &str) -> Result<(), PortError>;
+}
+
+/// Outstanding verification codes (ADR-062), stored hashed like refresh tokens.
+///
+/// At most one code per account is live at a time: `insert` supersedes any
+/// previous one. Without that, "the current code" would have to be resolved by
+/// comparing timestamps, and two codes issued inside the same microsecond
+/// (`now_utc` truncates there) would make it a coin flip — an ambiguity that
+/// resend, of all operations, would hit first.
+#[async_trait]
+pub trait EmailVerificationRepository: Send + Sync {
+    /// Stores a new code and consumes any code the user still had outstanding
+    /// **of the same purpose** (ADR-063): requesting a password reset must not
+    /// silently kill the sign-in code the same person is holding.
+    async fn insert(&self, verification: &EmailVerification) -> Result<(), PortError>;
+    /// The user's one live (unconsumed) code of that purpose, whatever its
+    /// state otherwise. Expired and exhausted codes are still returned, so the
+    /// caller can tell "expired" from "never existed" and say which.
+    async fn active_for_user(
+        &self,
+        user_id: Uuid,
+        purpose: CodePurpose,
+    ) -> Result<Option<EmailVerification>, PortError>;
+    /// Any code of that purpose whose hash matches, live or spent (ADR-063).
+    ///
+    /// Used to recognise a code that *was* real but has since been superseded,
+    /// so the answer can say "that one is stale, use the newest email" instead
+    /// of "invalid" — and so a stale code does not burn an attempt on the code
+    /// that replaced it.
+    async fn find_by_hash(
+        &self,
+        user_id: Uuid,
+        purpose: CodePurpose,
+        code_hash: &str,
+    ) -> Result<Option<EmailVerification>, PortError>;
+    /// Counts a wrong guess against the attempt cap.
+    async fn record_attempt(&self, id: Uuid) -> Result<(), PortError>;
+    async fn mark_consumed(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), PortError>;
+    /// Purges codes that expired before `cutoff` (called by the reaper).
+    async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, PortError>;
+}
+
+/// Delivers transactional email (ADR-062).
+///
+/// The port names the *intent*, not the template, so an adapter is free to
+/// send HTML, plain text, or hand off to a provider's own template. A failure
+/// here is not best-effort: if the code never left the building, registration
+/// has to say so rather than park someone in front of a code entry box that
+/// can never be satisfied.
+#[async_trait]
+pub trait EmailSender: Send + Sync {
+    /// `purpose` picks the wording — one method rather than two, so a new kind
+    /// of code cannot ship with a provider adapter that forgot to implement it.
+    async fn send_code(
+        &self,
+        to: &str,
+        code: &str,
+        ttl_minutes: i64,
+        purpose: CodePurpose,
+    ) -> Result<(), PortError>;
 }
 
 #[async_trait]
@@ -90,6 +156,10 @@ pub trait RefreshTokenRepository: Send + Sync {
     /// Revokes an entire rotation lineage (ADR-056): called on reuse detection
     /// to kill the stolen token's whole family in one shot.
     async fn delete_family(&self, family_id: Uuid) -> Result<(), PortError>;
+    /// Revokes every session the user has, across all families. Used by
+    /// password reset (ADR-063): someone recovering an account they think is
+    /// compromised expects the intruder to be signed out, not just themselves.
+    async fn delete_for_user(&self, user_id: Uuid) -> Result<(), PortError>;
     /// Purges expired tokens (called by the background reaper).
     async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, PortError>;
 }

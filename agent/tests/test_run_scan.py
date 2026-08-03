@@ -140,3 +140,142 @@ def test_original_error_survives_when_failure_report_also_breaks() -> None:
 
     with pytest.raises(RuntimeError, match="GoPlus quota exceeded"):
         run_scan("job-1", "0xwallet", ["1"], source, FakeThreatIntel(), sink)
+
+
+# ---------------------------------------------------------------- chain resilience (ADR-064)
+
+
+class PerChainSource:
+    """Fails on the named chains, returns approvals for the rest."""
+
+    def __init__(
+        self, by_chain: dict[str, list[RawApproval]], failing: dict[str, Exception]
+    ) -> None:
+        self.by_chain = by_chain
+        self.failing = failing
+        self.calls: list[str] = []
+
+    def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
+        self.calls.append(chain_id)
+        if chain_id in self.failing:
+            raise self.failing[chain_id]
+        return self.by_chain.get(chain_id, [])
+
+
+class RecordingReporter:
+    def __init__(self) -> None:
+        self.steps: list[tuple[str, object]] = []
+
+    def report_step(self, job_id: str, step: object) -> None:
+        self.steps.append((job_id, step))
+
+
+def test_one_unreachable_chain_does_not_discard_the_others() -> None:
+    # ADR-064: a GoPlus outage on one chain used to abort the whole scan and
+    # throw away everything already collected, so a Base blip meant no
+    # Ethereum findings either.
+    source = PerChainSource(
+        {"1": [approval("a", "1")]},
+        {"8453": RuntimeError("GoPlus error (code 4029): rate limited")},
+    )
+    sink = RecordingSink()
+    reporter = RecordingReporter()
+
+    results = run_scan(
+        "job-1",
+        "0xwallet",
+        ["1", "8453"],
+        source,
+        FakeThreatIntel(),
+        sink,
+        reporter=reporter,
+    )
+
+    assert source.calls == ["1", "8453"], "the failure must not stop the loop"
+    assert [f.spender_address for f in results] == ["a"]
+    assert sink.delivered, "what was found is still delivered"
+    assert not sink.failures
+
+
+def test_an_unreachable_chain_is_recorded_in_the_journal() -> None:
+    # Silence here would be the dangerous outcome: a partial scan that reads
+    # as a clean sweep is the ADR-059 lie in a different costume.
+    source = PerChainSource(
+        {"1": [approval("a", "1")]},
+        {"8453": RuntimeError("GoPlus error (code 4029): rate limited")},
+    )
+    reporter = RecordingReporter()
+
+    run_scan(
+        "job-1",
+        "0xwallet",
+        ["1", "8453"],
+        source,
+        FakeThreatIntel(),
+        RecordingSink(),
+        reporter=reporter,
+    )
+
+    assert len(reporter.steps) == 1
+    _, step = reporter.steps[0]
+    assert step.kind == "degraded"
+    assert step.detail == "8453"
+    assert "rate limited" in step.reason
+
+
+def test_every_chain_failing_fails_the_job_rather_than_reporting_clean() -> None:
+    # An empty delivery renders as "no dangerous approvals". Saying that about
+    # a wallet nobody could look at is worse than failing loudly.
+    source = PerChainSource(
+        {},
+        {
+            "1": RuntimeError("GoPlus down"),
+            "8453": RuntimeError("GoPlus down"),
+        },
+    )
+    sink = RecordingSink()
+
+    with pytest.raises(RuntimeError, match="no chain could be scanned"):
+        run_scan(
+            "job-1",
+            "0xwallet",
+            ["1", "8453"],
+            source,
+            FakeThreatIntel(),
+            sink,
+            reporter=RecordingReporter(),
+        )
+
+    assert not sink.delivered
+    assert sink.failures, "the sink is told, so the job shows as failed"
+
+
+def test_a_broken_reporter_never_fails_the_scan() -> None:
+    class BrokenReporter:
+        def report_step(self, job_id: str, step: object) -> None:
+            raise ConnectionError("backend down")
+
+    source = PerChainSource({"1": [approval("a", "1")]}, {"8453": RuntimeError("boom")})
+
+    results = run_scan(
+        "job-1",
+        "0xwallet",
+        ["1", "8453"],
+        source,
+        FakeThreatIntel(),
+        RecordingSink(),
+        reporter=BrokenReporter(),
+    )
+
+    assert [f.spender_address for f in results] == ["a"]
+
+
+def test_scanning_still_works_without_a_reporter() -> None:
+    # Workflow mode ran without one before ADR-064; it must stay optional.
+    source = PerChainSource({"1": [approval("a", "1")]}, {"8453": RuntimeError("boom")})
+
+    results = run_scan(
+        "job-1", "0xwallet", ["1", "8453"], source, FakeThreatIntel(), RecordingSink()
+    )
+
+    assert [f.spender_address for f in results] == ["a"]

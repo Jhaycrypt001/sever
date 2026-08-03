@@ -159,10 +159,15 @@ class FakeApprovalRevoker:
     def __init__(self, meter: UsageMeter | None = None) -> None:
         self._meter = meter
 
-    def revoke(self, finding: ApprovalFinding) -> ApprovalFinding:
+    def revoke(self, finding: ApprovalFinding, wallet_address: str) -> ApprovalFinding:
         from dataclasses import replace
 
         from aiagent.domain.models import RevocationStatus
+
+        # The fake acts as whatever wallet it is handed, so it never trips the
+        # delegation guard of ADR-065 — that guard belongs to the adapter that
+        # actually has an execution identity.
+        del wallet_address
 
         # Counted as a generic external call for the spend-cap accounting
         # (ADR-048); real gas cost is not an LLM/API spend and is tracked

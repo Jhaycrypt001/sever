@@ -25,16 +25,20 @@ use crate::application::answer_clarification::AnswerError;
 use crate::application::ingest_results::IngestError;
 use crate::application::launch_search::LaunchError;
 use crate::application::login_user::LoginError;
+use crate::application::password_reset::{RequestResetError, ResetPasswordError};
 use crate::application::recurring_searches::RecurringError;
 use crate::application::refresh_session::RefreshError;
 use crate::application::register_user::RegisterError;
+use crate::application::verify_email::{ConfirmVerificationError, RequestVerificationError};
 use crate::application::{
-    AnswerClarification, IngestResults, LaunchSearch, LoginUser, RecurringSearches, RefreshSession,
-    RegisterUser, SearchQueries, SessionTokens,
+    AnswerClarification, ConfirmEmailVerification, IngestResults, LaunchSearch, LoginUser,
+    RecurringSearches, RefreshSession, RegisterUser, RequestEmailVerification,
+    RequestPasswordReset, ResetPassword, SearchQueries, SessionIssuer, SessionTokens,
 };
 use crate::domain::ports::{
-    DigestSender, JobDispatcher, JobRepository, PasswordHasher, RecurringSearchRepository,
-    RefreshTokenRepository, SecurityAudit, TokenService, UserRepository,
+    DigestSender, EmailSender, EmailVerificationRepository, JobDispatcher, JobRepository,
+    PasswordHasher, RecurringSearchRepository, RefreshTokenRepository, SecurityAudit, TokenService,
+    UserRepository,
 };
 use crate::domain::{
     AgentStep, ApprovalFinding, JobMode, JobStatus, JobUsage, RecurringSearch, RevocationStatus,
@@ -48,6 +52,20 @@ const REFRESH_COOKIE: &str = "refresh_token";
 pub struct AppState {
     register: Arc<RegisterUser>,
     login: Arc<LoginUser>,
+    /// Issue/resend a verification code (ADR-062).
+    request_verification: Arc<RequestEmailVerification>,
+    /// Accept a code and open a session (ADR-062). The only route to a
+    /// session there is — password login stops one step short (ADR-063).
+    confirm_verification: Arc<ConfirmEmailVerification>,
+    /// Mail a password-reset code (ADR-063).
+    request_reset: Arc<RequestPasswordReset>,
+    /// Set a new password from a reset code, and sign in (ADR-063).
+    reset_password: Arc<ResetPassword>,
+    /// Whether the API may echo verification codes back to the client.
+    /// Development only — see `AppConfig::expose_verification_codes`.
+    expose_verification_codes: bool,
+    /// Per-account throttle on verification attempts (ADR-057/062).
+    verify_throttle: rate_limit::Limiter,
     refresh: Arc<RefreshSession>,
     launch: Arc<LaunchSearch>,
     answer: Arc<AnswerClarification>,
@@ -90,6 +108,23 @@ impl Default for RateLimitConfig {
     }
 }
 
+/// Everything email verification needs (ADR-062), grouped so the wiring
+/// point does not grow four more positional arguments — two of which would be
+/// an `i64` and a `bool` sitting next to each other.
+pub struct EmailVerificationSetup {
+    pub verifications: Arc<dyn EmailVerificationRepository>,
+    pub mailer: Arc<dyn EmailSender>,
+    pub ttl_minutes: i64,
+    /// Return the code in the API response instead of relying on the mailbox.
+    /// `AppConfig` forces this off in production.
+    pub expose_codes: bool,
+    /// Per-account throttle on code attempts. Sized like the login throttle
+    /// but a **separate** budget on a separate key namespace: the two guess at
+    /// different secrets, and sharing one meant a person fumbling their code
+    /// spent the attempts they would need to sign in afterwards.
+    pub throttle: rate_limit::Limiter,
+}
+
 impl AppState {
     #[allow(clippy::too_many_arguments)] // boilerplate wiring point, one call site per binary
     pub fn new(
@@ -102,20 +137,48 @@ impl AppState {
         hasher: Arc<dyn PasswordHasher>,
         tokens: Arc<dyn TokenService>,
         audit: Arc<dyn SecurityAudit>,
+        email: EmailVerificationSetup,
         login_throttle: rate_limit::Limiter,
         internal_token: String,
         daily_search_quota: u32,
         refresh_ttl_days: i64,
     ) -> Self {
+        // One issuer, so a password login and an answered code open the same
+        // kind of session (ADR-062).
+        let sessions = Arc::new(SessionIssuer::new(
+            tokens.clone(),
+            refresh_tokens.clone(),
+            refresh_ttl_days,
+        ));
         Self {
             register: Arc::new(RegisterUser::new(users.clone(), hasher.clone())),
-            login: Arc::new(LoginUser::new(
-                users,
-                hasher,
-                tokens.clone(),
-                refresh_tokens.clone(),
-                refresh_ttl_days,
+            login: Arc::new(LoginUser::new(users.clone(), hasher.clone())),
+            request_verification: Arc::new(RequestEmailVerification::new(
+                users.clone(),
+                email.verifications.clone(),
+                email.mailer.clone(),
+                email.ttl_minutes,
             )),
+            confirm_verification: Arc::new(ConfirmEmailVerification::new(
+                users.clone(),
+                email.verifications.clone(),
+                sessions.clone(),
+            )),
+            request_reset: Arc::new(RequestPasswordReset::new(
+                users.clone(),
+                email.verifications.clone(),
+                email.mailer,
+                email.ttl_minutes,
+            )),
+            reset_password: Arc::new(ResetPassword::new(
+                users,
+                email.verifications,
+                hasher,
+                refresh_tokens.clone(),
+                sessions,
+            )),
+            expose_verification_codes: email.expose_codes,
+            verify_throttle: email.throttle,
             refresh: Arc::new(RefreshSession::new(
                 refresh_tokens,
                 tokens.clone(),
@@ -138,6 +201,16 @@ impl AppState {
             refresh_ttl_days,
         }
     }
+
+    /// The verification code, but only where showing it is allowed.
+    ///
+    /// The gate lives here rather than in the use case so there is exactly one
+    /// place to audit: if `expose_verification_codes` is false — which
+    /// `AppConfig` guarantees in production — no response can carry a code,
+    /// whatever a handler passes in.
+    fn exposed_code(&self, code: Option<String>) -> Option<String> {
+        code.filter(|_| self.expose_verification_codes)
+    }
 }
 
 // ---------------------------------------------------------------- OpenAPI (ADR-049 amendment)
@@ -157,12 +230,32 @@ struct AccessTokenResponse {
     access_token: String,
 }
 
-/// `{ "id": "…", "email": "…" }` — a created account.
+/// A created account (ADR-062). `verification_required` is always true: the
+/// account exists but cannot be signed into until the emailed code is entered,
+/// and the client uses this to move straight to the code screen.
+///
+/// `verification_code` is present **only** in a development configuration with
+/// no email provider, so the console can be driven without a mailbox. It is
+/// absent in production, where `AppConfig` refuses to expose it.
 #[derive(Serialize, ToSchema)]
 #[allow(dead_code)]
-struct AccountResponse {
+struct RegistrationResponse {
     id: Uuid,
     email: String,
+    verification_required: bool,
+    verification_code: Option<String>,
+}
+
+/// The answer to "send me a code".
+///
+/// Carries no claim that anything was sent — it cannot, because the request is
+/// answered identically for an unregistered address and an already-verified
+/// one, and saying `sent: true` there would be a field that lies. The client's
+/// wording is conditional to match ("if that address needs a code…").
+#[derive(Serialize, ToSchema)]
+#[allow(dead_code)]
+struct VerificationSentResponse {
+    verification_code: Option<String>,
 }
 
 /// `{ "error": "…" }` — the uniform error body (ADR-018).
@@ -210,6 +303,10 @@ impl utoipa::Modify for SecurityAddon {
     paths(
         register,
         login,
+        verify_email,
+        resend_verification,
+        forgot_password,
+        reset_password,
         refresh,
         logout,
         create_search,
@@ -222,6 +319,11 @@ impl utoipa::Modify for SecurityAddon {
     ),
     components(schemas(
         CredentialsRequest,
+        VerifyEmailRequest,
+        ResendVerificationRequest,
+        ResetPasswordRequest,
+        RegistrationResponse,
+        VerificationSentResponse,
         CreateSearchRequest,
         CreateRecurringRequest,
         AnswerRequest,
@@ -230,7 +332,6 @@ impl utoipa::Modify for SecurityAddon {
         RecurringView,
         JobCreatedResponse,
         AccessTokenResponse,
-        AccountResponse,
         ErrorResponse,
         ApprovalFinding,
         AgentStep,
@@ -260,6 +361,10 @@ pub fn router_with_limits(state: AppState, limits: RateLimitConfig) -> Router {
     let auth_routes = Router::new()
         .route("/api/auth/register", post(register))
         .route("/api/auth/login", post(login))
+        .route("/api/auth/verify", post(verify_email))
+        .route("/api/auth/verify/resend", post(resend_verification))
+        .route("/api/auth/password/forgot", post(forgot_password))
+        .route("/api/auth/password/reset", post(reset_password))
         .route("/api/auth/refresh", post(refresh))
         .route("/api/auth/logout", post(logout))
         .layer(axum::middleware::from_fn_with_state(
@@ -536,39 +641,184 @@ struct AnswerRequest {
     answer: String,
 }
 
+/// `{ "email": "…", "code": "123456" }` — answering a verification code.
+#[derive(Deserialize, ToSchema)]
+struct VerifyEmailRequest {
+    email: String,
+    code: String,
+}
+
+/// `{ "email": "…" }` — "send me another code", and "I forgot my password".
+#[derive(Deserialize, ToSchema)]
+struct ResendVerificationRequest {
+    email: String,
+}
+
+/// `{ "email": "…", "code": "123456", "password": "…" }` — account recovery.
+#[derive(Deserialize, ToSchema)]
+struct ResetPasswordRequest {
+    email: String,
+    code: String,
+    password: String,
+}
+
 // ---------------------------------------------------------------- public handlers
 
+/// Creates the account and mails it a verification code (ADR-062). No session
+/// is issued here — `POST /api/auth/verify` does that, once the address has
+/// answered.
 #[utoipa::path(post, path = "/api/auth/register", tag = "auth",
     request_body = CredentialsRequest,
     responses(
-        (status = 201, description = "Account created", body = AccountResponse),
+        (status = 201, description = "Account created, verification code sent", body = RegistrationResponse),
         (status = 409, description = "Email already registered", body = ErrorResponse),
-        (status = 422, description = "Invalid credentials", body = ErrorResponse)))]
+        (status = 422, description = "Invalid credentials", body = ErrorResponse),
+        (status = 502, description = "The verification email could not be sent", body = ErrorResponse)))]
 async fn register(State(state): State<AppState>, Json(body): Json<CredentialsRequest>) -> Response {
-    match state.register.execute(&body.email, &body.password).await {
-        Ok(user) => (
-            StatusCode::CREATED,
-            Json(json!({ "id": user.id, "email": user.email })),
-        )
-            .into_response(),
+    let user = match state.register.execute(&body.email, &body.password).await {
+        Ok(user) => user,
         Err(RegisterError::EmailTaken) => {
-            error_body(StatusCode::CONFLICT, "email already registered")
+            return error_body(StatusCode::CONFLICT, "email already registered")
         }
         Err(e @ (RegisterError::InvalidEmail | RegisterError::PasswordTooShort)) => {
-            error_body(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string())
+            return error_body(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string())
         }
         Err(RegisterError::Infrastructure(e)) => {
             tracing::error!(error = %e, "register failed");
+            return error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
+
+    let code = match state.request_verification.execute(&user.email).await {
+        Ok(code) => code,
+        Err(RequestVerificationError::Delivery(e)) => {
+            // The account exists but its code never left the building. Saying
+            // so is the only honest answer: the alternative parks someone in
+            // front of a code box that nothing can satisfy. `resend` is the
+            // recovery path once the provider is back.
+            tracing::error!(error = %e, "verification email delivery failed");
+            return error_body(
+                StatusCode::BAD_GATEWAY,
+                "account created, but the verification email could not be sent — try resending in a moment",
+            );
+        }
+        Err(RequestVerificationError::Infrastructure(e)) => {
+            tracing::error!(error = %e, "verification code could not be issued");
+            return error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
+
+    (
+        StatusCode::CREATED,
+        Json(json!({
+            "id": user.id,
+            "email": user.email,
+            "verification_required": true,
+            "verification_code": state.exposed_code(code),
+        })),
+    )
+        .into_response()
+}
+
+/// Accepts a verification code and signs the account in (ADR-062).
+#[utoipa::path(post, path = "/api/auth/verify", tag = "auth",
+    request_body = VerifyEmailRequest,
+    responses(
+        (status = 200, description = "Address verified; access token in body, refresh token as an HttpOnly cookie", body = AccessTokenResponse),
+        (status = 401, description = "Wrong, expired, or already-used code", body = ErrorResponse),
+        (status = 429, description = "Too many incorrect attempts on this code", body = ErrorResponse)))]
+async fn verify_email(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<VerifyEmailRequest>,
+) -> Response {
+    // Same per-account throttle as login (ADR-057): a six-digit code is only
+    // as strong as the number of guesses allowed per minute.
+    let email_key = body.email.trim().to_lowercase();
+    let ip = client_ip(&headers);
+    if !state.verify_throttle.allow(&email_key).await {
+        record_security_event(
+            &state,
+            SecurityEvent::new(SecurityEventKind::LoginThrottled, None, ip, email_key),
+        )
+        .await;
+        return error_body(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many attempts, slow down",
+        );
+    }
+
+    match state
+        .confirm_verification
+        .execute(&body.email, &body.code)
+        .await
+    {
+        Ok(tokens) => session_response(&state, tokens),
+        Err(
+            e @ (ConfirmVerificationError::InvalidCode
+            | ConfirmVerificationError::Superseded
+            | ConfirmVerificationError::Expired),
+        ) => {
+            record_security_event(
+                &state,
+                SecurityEvent::new(SecurityEventKind::LoginFailed, None, ip, email_key),
+            )
+            .await;
+            error_body(StatusCode::UNAUTHORIZED, &e.to_string())
+        }
+        Err(e @ ConfirmVerificationError::TooManyAttempts) => {
+            error_body(StatusCode::TOO_MANY_REQUESTS, &e.to_string())
+        }
+        Err(ConfirmVerificationError::Infrastructure(e)) => {
+            tracing::error!(error = %e, "verification failed");
             error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
         }
     }
 }
 
+/// Issues a fresh code, superseding any outstanding one (ADR-062).
+///
+/// Answers 202 whether or not the address is registered or already verified:
+/// a distinguishable response would make this an account-enumeration oracle.
+#[utoipa::path(post, path = "/api/auth/verify/resend", tag = "auth",
+    request_body = ResendVerificationRequest,
+    responses(
+        (status = 202, description = "A code was sent if the address needed one", body = VerificationSentResponse),
+        (status = 502, description = "The verification email could not be sent", body = ErrorResponse)))]
+async fn resend_verification(
+    State(state): State<AppState>,
+    Json(body): Json<ResendVerificationRequest>,
+) -> Response {
+    match state.request_verification.execute(&body.email).await {
+        Ok(code) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "verification_code": state.exposed_code(code) })),
+        )
+            .into_response(),
+        Err(RequestVerificationError::Delivery(e)) => {
+            tracing::error!(error = %e, "verification email delivery failed");
+            error_body(
+                StatusCode::BAD_GATEWAY,
+                "the verification email could not be sent — try again in a moment",
+            )
+        }
+        Err(RequestVerificationError::Infrastructure(e)) => {
+            tracing::error!(error = %e, "verification code could not be issued");
+            error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// Checks the password and mails a sign-in code (ADR-063).
+///
+/// Returns **202, not a session**: every sign-in takes two factors, and this
+/// endpoint owns only the first. `POST /api/auth/verify` finishes the job.
 #[utoipa::path(post, path = "/api/auth/login", tag = "auth",
     request_body = CredentialsRequest,
     responses(
-        (status = 200, description = "Access token in body; refresh token set as an HttpOnly cookie (ADR-008)", body = AccessTokenResponse),
-        (status = 401, description = "Invalid email or password", body = ErrorResponse)))]
+        (status = 202, description = "Password accepted, sign-in code sent — finish at /api/auth/verify (ADR-063)", body = VerificationSentResponse),
+        (status = 401, description = "Invalid email or password", body = ErrorResponse),
+        (status = 502, description = "The sign-in code could not be sent", body = ErrorResponse)))]
 async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -591,18 +841,139 @@ async fn login(
         );
     }
 
-    match state.login.execute(&body.email, &body.password).await {
-        Ok(tokens) => session_response(&state, tokens),
+    let user = match state.login.execute(&body.email, &body.password).await {
+        Ok(user) => user,
         Err(LoginError::InvalidCredentials) => {
             record_security_event(
                 &state,
                 SecurityEvent::new(SecurityEventKind::LoginFailed, None, ip, email_key),
             )
             .await;
-            error_body(StatusCode::UNAUTHORIZED, "invalid credentials")
+            return error_body(StatusCode::UNAUTHORIZED, "invalid credentials");
         }
         Err(LoginError::Infrastructure(e)) => {
             tracing::error!(error = %e, "login failed");
+            return error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error");
+        }
+    };
+
+    // Password accepted — now the second factor. Issued here rather than in
+    // the use case so that the only thing holding a `SessionIssuer` is the
+    // code-confirming path.
+    match state.request_verification.issue_for(&user).await {
+        Ok(code) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "verification_code": state.exposed_code(Some(code)) })),
+        )
+            .into_response(),
+        Err(RequestVerificationError::Delivery(e)) => {
+            // Surfaced, not swallowed: without the code nobody can finish this
+            // sign-in, so silence would look like the password was wrong.
+            tracing::error!(error = %e, "sign-in code delivery failed");
+            error_body(
+                StatusCode::BAD_GATEWAY,
+                "your password was accepted, but the sign-in code could not be sent — try again in a moment",
+            )
+        }
+        Err(RequestVerificationError::Infrastructure(e)) => {
+            tracing::error!(error = %e, "sign-in code could not be issued");
+            error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// Mails a password-reset code (ADR-063).
+///
+/// Always 202. "No account with that address" is exactly the sentence that
+/// turns a forgot-password form into an account enumeration tool.
+#[utoipa::path(post, path = "/api/auth/password/forgot", tag = "auth",
+    request_body = ResendVerificationRequest,
+    responses(
+        (status = 202, description = "A reset code was sent if the address has an account", body = VerificationSentResponse),
+        (status = 502, description = "The reset email could not be sent", body = ErrorResponse)))]
+async fn forgot_password(
+    State(state): State<AppState>,
+    Json(body): Json<ResendVerificationRequest>,
+) -> Response {
+    // Same per-account budget as the code screen: this endpoint sends mail to
+    // an address chosen by an unauthenticated caller, so it is the one most
+    // worth throttling.
+    let email_key = body.email.trim().to_lowercase();
+    if !state.verify_throttle.allow(&email_key).await {
+        return error_body(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many attempts, slow down",
+        );
+    }
+
+    match state.request_reset.execute(&body.email).await {
+        Ok(code) => (
+            StatusCode::ACCEPTED,
+            Json(json!({ "verification_code": state.exposed_code(code) })),
+        )
+            .into_response(),
+        Err(RequestResetError::Delivery(e)) => {
+            tracing::error!(error = %e, "password reset email delivery failed");
+            error_body(
+                StatusCode::BAD_GATEWAY,
+                "the reset email could not be sent — try again in a moment",
+            )
+        }
+        Err(RequestResetError::Infrastructure(e)) => {
+            tracing::error!(error = %e, "reset code could not be issued");
+            error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+/// Sets a new password from a reset code and signs in (ADR-063).
+#[utoipa::path(post, path = "/api/auth/password/reset", tag = "auth",
+    request_body = ResetPasswordRequest,
+    responses(
+        (status = 200, description = "Password changed; every other session revoked; access token in body", body = AccessTokenResponse),
+        (status = 401, description = "Wrong, stale, or expired reset code", body = ErrorResponse),
+        (status = 422, description = "New password too short", body = ErrorResponse),
+        (status = 429, description = "Too many incorrect attempts on this code", body = ErrorResponse)))]
+async fn reset_password(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<ResetPasswordRequest>,
+) -> Response {
+    let email_key = body.email.trim().to_lowercase();
+    let ip = client_ip(&headers);
+    if !state.verify_throttle.allow(&email_key).await {
+        return error_body(
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many attempts, slow down",
+        );
+    }
+
+    match state
+        .reset_password
+        .execute(&body.email, &body.code, &body.password)
+        .await
+    {
+        Ok(tokens) => session_response(&state, tokens),
+        Err(
+            e @ (ResetPasswordError::InvalidCode
+            | ResetPasswordError::Superseded
+            | ResetPasswordError::Expired),
+        ) => {
+            record_security_event(
+                &state,
+                SecurityEvent::new(SecurityEventKind::LoginFailed, None, ip, email_key),
+            )
+            .await;
+            error_body(StatusCode::UNAUTHORIZED, &e.to_string())
+        }
+        Err(e @ ResetPasswordError::TooManyAttempts) => {
+            error_body(StatusCode::TOO_MANY_REQUESTS, &e.to_string())
+        }
+        Err(e @ ResetPasswordError::PasswordTooShort) => {
+            error_body(StatusCode::UNPROCESSABLE_ENTITY, &e.to_string())
+        }
+        Err(ResetPasswordError::Infrastructure(e)) => {
+            tracing::error!(error = %e, "password reset failed");
             error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
         }
     }

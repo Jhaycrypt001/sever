@@ -1,4 +1,5 @@
 pub mod approval_finding;
+pub mod email_verification;
 pub mod job;
 pub mod ports;
 pub mod recurring;
@@ -7,6 +8,7 @@ pub mod security_event;
 pub mod user;
 
 pub use approval_finding::{sort_by_risk, ApprovalFinding, RevocationStatus, RiskTier};
+pub use email_verification::{CodePurpose, EmailVerification};
 pub use job::{AgentStep, JobMode, JobStatus, JobUsage, ScanJob};
 pub use recurring::RecurringSearch;
 pub use refresh_token::RefreshToken;

@@ -26,11 +26,20 @@ def _revoke_reason(outcome: ApprovalFinding) -> str:
         return f"auto-revoked: tx {outcome.revocation_tx_hash}"
     if outcome.revocation_status is RevocationStatus.SIMULATED:
         return "simulated only (KEEPERHUB_SIMULATE_ONLY): approval is still live"
+    if outcome.revocation_status is RevocationStatus.NOT_ATTEMPTED:
+        # ADR-065: refused before the network, because this wallet is not the
+        # one KeeperHub can execute as. Naming the reason matters — otherwise
+        # it reads as an unexplained omission on the most dangerous row.
+        return (
+            "not attempted: this wallet is not delegated to KeeperHub, "
+            "so the approval can only be revoked by its own owner"
+        )
     return "revocation attempt failed"
 
 
 def revoke_dangerous(
     job_id: str,
+    wallet_address: str,
     findings: list[ApprovalFinding],
     revoker: ApprovalRevoker,
     reporter: StepReporter,
@@ -48,7 +57,7 @@ def revoke_dangerous(
     outcome_by_key: dict[str, ApprovalFinding] = {}
     for finding in to_revoke:
         try:
-            outcome = revoker.revoke(finding)
+            outcome = revoker.revoke(finding, wallet_address)
         except Exception:  # noqa: BLE001 - a revoke failure is a result, not a crash
             logger.error("revocation raised", extra={"job_id": job_id}, exc_info=True)
             outcome = replace(finding, revocation_status=RevocationStatus.FAILED)

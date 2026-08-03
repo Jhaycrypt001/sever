@@ -93,6 +93,11 @@ def run_agent_scan(
         approvals: list[RawApproval] = []
         collected_keys: set[str] = set()
         steps: list[AgentStep] = []
+        # Coverage bookkeeping (ADR-064): a run where every attempted chain
+        # failed has looked at nothing, and must not deliver an empty result
+        # set that reads as "no dangerous approvals".
+        scanned_chains: set[str] = set()
+        degraded_chains: list[str] = []
 
         for seq in range(1, max_steps + 1):
             # Spend cap (ADR-048): money stops the run before the step budget
@@ -116,7 +121,25 @@ def run_agent_scan(
                 clarifier.request_clarification(job_id, action.question)
                 return None
             if isinstance(action, ScanAction):
-                found = source.fetch_approvals(wallet_address, action.chain_id)
+                try:
+                    found = source.fetch_approvals(wallet_address, action.chain_id)
+                except Exception as exc:  # noqa: BLE001 - one chain must not sink the run
+                    # ADR-064: record the gap and let the loop carry on to the
+                    # other chains. The step stays in the journal, so a run
+                    # that covered less than it was asked to says so rather
+                    # than reading as a clean sweep.
+                    logger.warning("chain %s could not be scanned: %s", action.chain_id, exc)
+                    degraded_chains.append(f"{action.chain_id}: {exc}")
+                    step = AgentStep(
+                        seq=seq,
+                        kind=AgentStepKind.DEGRADED,
+                        detail=action.chain_id,
+                        reason=f"chain not scanned: {exc}",
+                        new_hits=0,
+                    )
+                    steps.append(step)
+                    _report(reporter, job_id, step)
+                    continue
                 # Dedup by (chain, token, spender) across scans (ADR-034 equiv).
                 new = [
                     a
@@ -128,6 +151,7 @@ def run_agent_scan(
                     raw_approval_key(a.chain_id, a.token_address, a.spender_address) for a in new
                 )
                 approvals.extend(new)
+                scanned_chains.add(action.chain_id)
                 step = AgentStep(
                     seq=seq,
                     kind=AgentStepKind.SCAN,
@@ -154,11 +178,23 @@ def run_agent_scan(
             steps.append(step)
             _report(reporter, job_id, step)
 
+        # ADR-064: every chain the agent tried was unreachable, so nothing was
+        # actually inspected. Failing is the only honest outcome — an empty
+        # delivery here renders as "no dangerous approvals found", which is a
+        # clean bill of health for a wallet nobody looked at.
+        if degraded_chains and not scanned_chains:
+            # The causes travel with it: this string becomes the job's error
+            # field, and "no chain could be scanned" alone is unactionable.
+            raise RuntimeError(
+                f"no chain could be scanned ({'; '.join(degraded_chains)}) — "
+                "refusing to report a wallet as clean"
+            )
+
         findings = sort_by_risk(resolve_approvals(approvals, threat_intel))
 
         # Skip execution (an extra call, real gas) once over budget (ADR-048).
         if revoker is not None and not (budget is not None and budget.exceeded()):
-            findings = revoke_dangerous(job_id, findings, revoker, reporter, steps)
+            findings = revoke_dangerous(job_id, wallet_address, findings, revoker, reporter, steps)
 
         if seen_keys is not None:
             # Recurring run (ADR-033): flag the delta against previous runs
