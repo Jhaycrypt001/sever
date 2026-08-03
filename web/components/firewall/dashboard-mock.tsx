@@ -69,20 +69,20 @@ const LEDGER = [
     '03:02:03',
   ],
   ['0x7c41d9…e0b2', 'USDC', 'Ethereum', 'revoked', '46,118', '02:54:11'],
-  ['0x2be8a1…4f7c', 'DAI', 'Base', 'pending', '—', '02:51:47'],
+  ['0x2be8a1…4f7c', 'DAI', 'Base', 'pending', 'n/a', '02:51:47'],
   ['0x93fd0c…7a19', 'COW', 'Ethereum', 'revoked', '44,902', '02:47:26'],
-  ['0x51ac77…bb03', 'XYZ', 'Polygon', 'failed', '—', '02:41:58'],
+  ['0x51ac77…bb03', 'XYZ', 'Polygon', 'failed', 'n/a', '02:41:58'],
   ['0xe0177b…9d44', 'WETH', 'Arbitrum', 'revoked', '48,301', '02:38:12'],
-  ['0x6a2c19…30fe', 'USDT', 'Base', 'simulated', '—', '02:33:05'],
+  ['0x6a2c19…30fe', 'USDT', 'Base', 'simulated', 'n/a', '02:33:05'],
   ['0xb84f30…1c77', 'ARB', 'Arbitrum', 'revoked', '45,760', '02:29:44'],
 ]
 
 const JOURNAL = [
-  { i: '01', t: 'scan · chain 1 — 12 approvals, 3 new', w: '2m ago' },
+  { i: '01', t: 'scan · chain 1 · 12 approvals, 3 new', w: '2m ago' },
   { i: '02', t: 'assess · 1 dangerous, 2 watch', w: '2m ago' },
   { i: '03', t: 'revoke · 0xbad0…ad00 submitted', w: '2m ago' },
   { i: '04', t: 'revoke · confirmed, tx 0xa3e2…22c28', w: '1m ago' },
-  { i: '05', t: 'scan · chain 8453 — 0 new', w: '1m ago' },
+  { i: '05', t: 'scan · chain 8453 · 0 new', w: '1m ago' },
   { i: '06', t: 'finish · all configured chains scanned', w: '58s ago' },
 ]
 

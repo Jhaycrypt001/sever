@@ -1,8 +1,9 @@
 'use client'
 
-import Image from 'next/image'
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
+import { Reveal, RevealGroup, RevealItem } from '../motion/reveal'
+import { ApprovalMap } from './approval-map'
 import { Display, Label, MetaRule, Shell } from './primitives'
 
 const SHEET_META = [
@@ -34,7 +35,7 @@ const ZONES = [
     id: 'D',
     tag: 'Restraint',
     title: 'Watch and Safe are surfaced, never touched',
-    body: 'Only a confirmed malicious signal spends gas. Contradictory intelligence — a spender both trusted and flagged — is shown to you rather than acted on.',
+    body: 'Only a confirmed malicious signal spends gas. Contradictory intelligence, a spender both trusted and flagged, is shown to you rather than acted on.',
   },
   {
     id: 'E',
@@ -59,7 +60,7 @@ export function SpecSheet() {
       className="border-t border-border/60 bg-background py-20 md:py-28"
     >
       <Shell>
-        <div className="flex flex-col gap-6 border-b border-border/60 pb-10 md:flex-row md:items-end md:justify-between">
+        <Reveal className="flex flex-col gap-6 border-b border-border/60 pb-10 md:flex-row md:items-end md:justify-between">
           <Display
             lead="The firewall,"
             trail="at a glance."
@@ -84,20 +85,13 @@ export function SpecSheet() {
               ))}
             </dl>
           </div>
-        </div>
+        </Reveal>
 
         <div className="mt-10 flex flex-col gap-10 lg:flex-row lg:gap-16">
           {/* plate */}
-          <div className="flex w-full shrink-0 flex-col lg:w-[42%]">
+          <Reveal className="flex w-full shrink-0 flex-col lg:w-[42%]">
             <div className="relative aspect-[4/5] w-full overflow-hidden border-x border-border/60">
-              <Image
-                src="/images/surface.png"
-                alt="Macro photograph of a layered mineral surface"
-                fill
-                sizes="(min-width: 1024px) 42vw, 100vw"
-                className="object-cover"
-                priority={false}
-              />
+              <ApprovalMap />
               <span className="label absolute inset-x-0 top-6 text-center tracking-[0.35em] text-white/85">
                 Surface
               </span>
@@ -108,14 +102,17 @@ export function SpecSheet() {
               left="Spec · 6 zones, A through F"
               right="Hover or scroll to inspect"
             />
-          </div>
+          </Reveal>
 
           {/* zone list */}
-          <ul className="flex min-w-0 flex-1 flex-col border-t border-border/60">
+          <RevealGroup
+            className="flex min-w-0 flex-1 flex-col border-t border-border/60"
+            stagger={0.07}
+          >
             {ZONES.map((z) => {
               const isActive = active === z.id
               return (
-                <li
+                <RevealItem
                   key={z.id}
                   onMouseEnter={() => setActive(z.id)}
                   onFocus={() => setActive(z.id)}
@@ -150,10 +147,10 @@ export function SpecSheet() {
                       {z.body}
                     </p>
                   </div>
-                </li>
+                </RevealItem>
               )
             })}
-          </ul>
+          </RevealGroup>
         </div>
       </Shell>
     </section>

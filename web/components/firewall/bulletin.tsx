@@ -1,5 +1,6 @@
 import { EXECUTION_MS, GAS_USED } from '@/lib/proof'
 import { cn } from '@/lib/utils'
+import { Reveal, RevealGroup, RevealItem } from '../motion/reveal'
 import { Display, GhostLink, GlowPill, Label, Shell } from './primitives'
 
 /**
@@ -46,7 +47,7 @@ export function Bulletin() {
 
       <div className="flex flex-col border-b border-border/60 lg:flex-row">
         {/* headline */}
-        <div className="flex min-w-0 flex-1 flex-col justify-center px-6 py-16 md:px-8 md:py-24 lg:border-r lg:border-border/60 lg:pl-[max(2rem,calc((100vw-1232px)/2+2rem))]">
+        <Reveal className="flex min-w-0 flex-1 flex-col justify-center px-6 py-16 md:px-8 md:py-24 lg:border-r lg:border-border/60 lg:pl-[max(2rem,calc((100vw-1232px)/2+2rem))]">
           <Label>Headline · Filed 2026.08.02</Label>
 
           <Display
@@ -59,14 +60,14 @@ export function Bulletin() {
             It starts the day you approve the contract. The signature is already
             on chain, sitting there, waiting. Every revoke tool asks you to
             notice first. This one does the noticing, and then does something
-            about it — in {EXECUTION_MS} milliseconds, measured end to end.
+            about it, in {EXECUTION_MS} milliseconds, measured end to end.
           </p>
-        </div>
+        </Reveal>
 
         {/* stats stack */}
-        <ul className="flex w-full shrink-0 flex-col lg:w-[42%]">
+        <RevealGroup className="flex w-full shrink-0 flex-col lg:w-[42%]" stagger={0.12}>
           {STATS.map((s) => (
-            <li
+            <RevealItem
               key={s.label}
               className={cn(
                 'flex flex-1 flex-col justify-center gap-4 border-t border-border/60 px-6 py-12 md:px-12 lg:border-t-0 lg:[&:not(:first-child)]:border-t',
@@ -81,9 +82,9 @@ export function Bulletin() {
               <Label className={s.invert ? 'text-background/70' : undefined}>
                 {s.label}
               </Label>
-            </li>
+            </RevealItem>
           ))}
-        </ul>
+        </RevealGroup>
       </div>
 
       {/* CTA strip */}

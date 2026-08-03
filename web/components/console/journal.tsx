@@ -23,7 +23,7 @@ export function Journal({ steps }: { steps: AgentStep[] }) {
   if (steps.length === 0) {
     return (
       <p className="px-4 py-8 text-center font-mono text-xs text-white/35">
-        Workflow mode runs a fixed pipeline — there is no decision journal.
+        Workflow mode runs a fixed pipeline, so there is no decision journal.
       </p>
     )
   }

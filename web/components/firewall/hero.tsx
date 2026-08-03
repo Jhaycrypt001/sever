@@ -1,3 +1,4 @@
+import { Reveal, RevealWords } from '../motion/reveal'
 import { DashboardMock } from './dashboard-mock'
 import { GhostLink, GlowPill, Shell } from './primitives'
 
@@ -16,19 +17,21 @@ export function Hero() {
 
       <Shell className="relative z-10">
         <h1 className="display max-w-[18ch] text-balance text-[3.25rem] leading-[0.94] text-foreground sm:text-[4.5rem] md:text-[5.5rem] lg:text-[6.75rem]">
-          The approval that drains you is already signed
+          <RevealWords text="The approval that drains you is already signed" />
         </h1>
 
-        <p className="mt-8 max-w-[46ch] text-pretty text-base leading-relaxed text-muted-foreground md:text-lg">
-          Approval Firewall finds the malicious token approvals sitting in your
-          wallet and revokes them onchain through KeeperHub — without waiting
-          for you to notice.
-        </p>
+        <Reveal delay={0.35}>
+          <p className="mt-8 max-w-[46ch] text-pretty text-base leading-relaxed text-muted-foreground md:text-lg">
+            Approval Firewall finds the malicious token approvals sitting in
+            your wallet and revokes them onchain through KeeperHub, without
+            waiting for you to notice.
+          </p>
 
-        <div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-4">
-          <GlowPill href="/console">Scan a wallet</GlowPill>
-          <GhostLink href="#evidence">See the transaction</GhostLink>
-        </div>
+          <div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-4">
+            <GlowPill href="/console">Scan a wallet</GlowPill>
+            <GhostLink href="#evidence">See the transaction</GhostLink>
+          </div>
+        </Reveal>
       </Shell>
 
       {/*

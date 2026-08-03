@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { Reveal, RevealGroup, RevealItem } from '../motion/reveal'
 import { Display, Label, Shell } from './primitives'
 
 type Ticket = {
@@ -85,9 +86,9 @@ function TicketCard({ t }: { t: Ticket }) {
   const inv = t.featured
 
   return (
-    <li
+    <div
       className={cn(
-        'relative flex flex-col border border-border/60',
+        'relative flex h-full flex-col border border-border/60',
         inv ? 'bg-foreground text-background' : 'bg-card/40 text-foreground',
       )}
     >
@@ -207,7 +208,7 @@ function TicketCard({ t }: { t: Ticket }) {
           {t.cta}
         </a>
       </div>
-    </li>
+    </div>
   )
 }
 
@@ -220,17 +221,24 @@ export function Pricing() {
       <Shell>
         <Label>§ Ledger · three tickets · 2026.08</Label>
 
-        <Display
-          lead="Scanning is free."
-          trail="You pay for the revoking."
-          className="mt-8 max-w-[24ch] text-[2.5rem] sm:text-[3.25rem] md:text-[4rem]"
-        />
+        <Reveal>
+          <Display
+            lead="Scanning is free."
+            trail="You pay for the revoking."
+            className="mt-8 max-w-[24ch] text-[2.5rem] sm:text-[3.25rem] md:text-[4rem]"
+          />
+        </Reveal>
 
-        <ul className="mt-16 grid grid-cols-1 items-start gap-6 lg:grid-cols-3">
+        <RevealGroup
+          className="mt-16 grid grid-cols-1 items-start gap-6 lg:grid-cols-3"
+          stagger={0.12}
+        >
           {TICKETS.map((t) => (
-            <TicketCard key={t.tier} t={t} />
+            <RevealItem key={t.tier} className="h-full">
+              <TicketCard t={t} />
+            </RevealItem>
           ))}
-        </ul>
+        </RevealGroup>
 
         <p className="mt-10 text-center">
           <Label>

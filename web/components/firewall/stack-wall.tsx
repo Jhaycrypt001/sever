@@ -1,3 +1,4 @@
+import { Reveal, RevealGroup, RevealItem } from '../motion/reveal'
 import { Display, Label, MetaRule, Shell } from './primitives'
 
 /**
@@ -34,27 +35,37 @@ export function StackWall() {
           right={`${CHAINS.length} chains configured`}
         />
 
-        <Display
-          lead="Built on things"
-          trail="you can check."
-          className="mt-12 max-w-[20ch] text-[2.5rem] sm:text-[3.25rem] md:text-[4rem]"
-        />
+        <Reveal>
+          <Display
+            lead="Built on things"
+            trail="you can check."
+            className="mt-12 max-w-[20ch] text-[2.5rem] sm:text-[3.25rem] md:text-[4rem]"
+          />
+        </Reveal>
 
-        <ul className="mt-14 grid grid-cols-2 border-l border-t border-border/60 sm:grid-cols-3 lg:grid-cols-4">
+        <RevealGroup
+          className="mt-14 grid grid-cols-2 border-l border-t border-border/60 sm:grid-cols-3 lg:grid-cols-4"
+          stagger={0.05}
+        >
           {STACK.map((s) => (
-            <li
+            <RevealItem
               key={s.name}
-              className="group flex aspect-[3/2] flex-col justify-between border-b border-r border-border/60 p-5 transition-colors hover:bg-foreground/[0.04]"
+              y={16}
+              // `min-w-0` lets the column shrink below its longest word.
+              // Without it a name like "OpenTelemetry" sets the grid track's
+              // min-content width and pushes the page into a sideways scroll
+              // on a 320px screen.
+              className="group flex aspect-[3/2] min-w-0 flex-col justify-between border-b border-r border-border/60 p-4 transition-colors hover:bg-foreground/[0.04] sm:p-5"
             >
-              <Label className="transition-colors group-hover:text-foreground">
+              <Label className="break-words transition-colors group-hover:text-foreground">
                 {s.role}
               </Label>
-              <span className="display text-pretty text-xl text-muted-foreground transition-colors group-hover:text-foreground md:text-2xl">
+              <span className="display text-pretty break-words text-lg text-muted-foreground transition-colors group-hover:text-foreground sm:text-xl md:text-2xl">
                 {s.name}
               </span>
-            </li>
+            </RevealItem>
           ))}
-        </ul>
+        </RevealGroup>
 
         <div className="mt-6 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <Label>

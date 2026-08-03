@@ -1,4 +1,5 @@
 import { REPO_URL, SEPOLIA_TX_URL } from '@/lib/proof'
+import { FoldingWord } from './folding-word'
 import { GlowButton, Label, MetaRule, Shell } from './primitives'
 
 const COLUMNS = [
@@ -50,20 +51,11 @@ export function SiteFooter() {
           right="2026.08"
         />
 
-        <p
-          aria-label="Approval Firewall"
+        <FoldingWord
+          word="FIREWALL."
+          label="Approval Firewall"
           className="display mt-12 flex w-full justify-between text-foreground"
-        >
-          {'FIREWALL.'.split('').map((ch, i) => (
-            <span
-              key={`${ch}-${i}`}
-              aria-hidden="true"
-              className="text-[clamp(2.5rem,11.5vw,10rem)] leading-none"
-            >
-              {ch}
-            </span>
-          ))}
-        </p>
+        />
 
         <p className="mx-auto mt-12 max-w-[52ch] text-pretty text-center leading-relaxed text-muted-foreground">
           Paste an address and see every approval it has ever granted, sorted

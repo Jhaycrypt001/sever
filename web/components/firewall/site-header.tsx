@@ -1,6 +1,7 @@
 'use client'
 
-import { X } from 'lucide-react'
+import { AnimatePresence, motion, useMotionValueEvent, useReducedMotion, useScroll } from 'motion/react'
+import { Menu, X } from 'lucide-react'
 import { useState } from 'react'
 import { REPO_URL, SEPOLIA_TX_URL } from '@/lib/proof'
 import { cn } from '@/lib/utils'
@@ -14,11 +15,13 @@ const NAV = [
   { label: 'SOURCE', href: REPO_URL },
 ]
 
+const EASE = [0.16, 1, 0.3, 1] as const
+
 function AnnouncementBanner({ onClose }: { onClose: () => void }) {
   return (
     <div className="relative flex items-center justify-center gap-4 bg-[#fafafa] px-12 py-3 text-[#0a0a0a]">
       <p className="text-center text-sm">
-        Every revocation is a real onchain transaction — here is the first one.
+        Every revocation is a real onchain transaction. Here is the first one.
       </p>
       <a
         href={SEPOLIA_TX_URL}
@@ -44,13 +47,15 @@ function Wordmark() {
   return (
     <a
       href="#"
-      aria-label="Approval Firewall — home"
-      className="flex shrink-0 items-center gap-3"
+      aria-label="Approval Firewall, home"
+      // Allowed to shrink: at 320px the wordmark plus the menu button did not
+      // fit, and an unshrinkable wordmark pushed the whole page sideways.
+      className="flex min-w-0 items-center gap-2 sm:gap-3"
     >
       {/* A shield over a severed link: this revokes, it does not just watch. */}
       <svg
         viewBox="0 0 32 32"
-        className="size-7 text-foreground"
+        className="size-6 shrink-0 text-foreground sm:size-7"
         aria-hidden="true"
         fill="none"
         stroke="currentColor"
@@ -61,26 +66,86 @@ function Wordmark() {
         <path d="M13.4 13 11.8 14.6a3.4 3.4 0 0 0 4.8 4.8l1.6-1.6" />
         <path d="M18.6 19 20.2 17.4a3.4 3.4 0 0 0-4.8-4.8l-1.6 1.6" />
       </svg>
-      <span className="display flex items-start whitespace-nowrap text-[1.375rem] leading-none text-foreground md:text-[1.6875rem]">
+      <span className="display truncate whitespace-nowrap text-[1.125rem] leading-none text-foreground sm:text-[1.375rem] md:text-[1.6875rem]">
         Approval Firewall
       </span>
     </a>
   )
 }
 
+/**
+ * The header folds away on the way down and unfolds on the way up.
+ *
+ * Reading direction is the signal: scrolling down means the reader is moving
+ * through the page and the chrome is in the way; scrolling up almost always
+ * means they are going back for the navigation. A header that merely sticks
+ * costs vertical space on every screen for the few seconds anyone wants it.
+ *
+ * `useScroll` is read through `useMotionValueEvent` rather than a React scroll
+ * listener so the sampling stays off the render path, and the direction test
+ * carries a small threshold so a trackpad's sub-pixel jitter cannot flap it.
+ */
 export function SiteHeader() {
   const [bannerOpen, setBannerOpen] = useState(true)
+  const [folded, setFolded] = useState(false)
+  const [scrolled, setScrolled] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [lastY, setLastY] = useState(0)
+
+  const reduce = useReducedMotion()
+  const { scrollY } = useScroll()
+
+  useMotionValueEvent(scrollY, 'change', (y) => {
+    const previous = lastY
+    setLastY(y)
+    setScrolled(y > 24)
+
+    // An open menu must never be folded out from under the reader's finger.
+    if (menuOpen) return
+
+    const delta = y - previous
+    if (Math.abs(delta) < 6) return
+    // Never fold inside the first viewport: the hero CTA lives there and the
+    // header is the only other way to reach the console.
+    setFolded(delta > 0 && y > 160)
+  })
 
   return (
-    <header className="absolute inset-x-0 top-0 z-50">
-      {bannerOpen ? (
-        <AnnouncementBanner onClose={() => setBannerOpen(false)} />
-      ) : null}
+    <motion.header
+      className="fixed inset-x-0 top-0 z-50"
+      animate={reduce ? undefined : { y: folded ? '-110%' : '0%' }}
+      transition={{ duration: 0.45, ease: EASE }}
+    >
+      <AnimatePresence initial={false}>
+        {bannerOpen && !scrolled ? (
+          <motion.div
+            key="banner"
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: 'auto', opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.35, ease: EASE }}
+            className="overflow-hidden"
+          >
+            <AnnouncementBanner onClose={() => setBannerOpen(false)} />
+          </motion.div>
+        ) : null}
+      </AnimatePresence>
 
-      <div className="mx-auto flex w-full max-w-[1232px] items-center justify-between gap-4 px-6 py-6 md:px-8">
+      <div
+        className={cn(
+          'mx-auto flex w-full max-w-[1232px] items-center justify-between gap-4 px-6 py-6 transition-colors duration-300 md:px-8',
+        )}
+      >
         <Wordmark />
 
-        <div className="flex items-center rounded-full border border-border/70 bg-background/40 p-1 backdrop-blur-md">
+        <div
+          className={cn(
+            'flex items-center rounded-full border p-1 transition-all duration-300',
+            scrolled
+              ? 'border-border/70 bg-background/70 shadow-lg shadow-black/20 backdrop-blur-xl'
+              : 'border-border/70 bg-background/40 backdrop-blur-md',
+          )}
+        >
           <nav aria-label="Main" className="hidden items-center lg:flex">
             {NAV.map((item) => (
               <a
@@ -111,18 +176,67 @@ export function SiteHeader() {
             ))}
           </nav>
 
-          {/* The template had a theme toggle here. It only flipped a local
-              boolean — the page is committed to dark, down to hard-coded
-              surfaces in the CTA — so it was a control that did nothing.
-              Removed rather than faked. */}
           <a
             href="/console"
-            className="label ml-2 rounded-full bg-foreground px-5 py-3 text-background transition-opacity hover:opacity-85"
+            className="label ml-2 hidden rounded-full bg-foreground px-5 py-3 text-background transition-opacity hover:opacity-85 sm:inline-block"
           >
             SCAN A WALLET
           </a>
+
+          <button
+            type="button"
+            onClick={() => setMenuOpen((open) => !open)}
+            aria-expanded={menuOpen}
+            aria-controls="mobile-nav"
+            aria-label={menuOpen ? 'Close menu' : 'Open menu'}
+            className="ml-1 flex size-11 items-center justify-center rounded-full text-foreground lg:hidden"
+          >
+            {menuOpen ? (
+              <X className="size-5" strokeWidth={1.5} />
+            ) : (
+              <Menu className="size-5" strokeWidth={1.5} />
+            )}
+          </button>
         </div>
       </div>
-    </header>
+
+      <AnimatePresence>
+        {menuOpen ? (
+          <motion.nav
+            id="mobile-nav"
+            aria-label="Mobile"
+            key="mobile-nav"
+            initial={{ opacity: 0, y: -12 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -12 }}
+            transition={{ duration: 0.28, ease: EASE }}
+            className="mx-6 overflow-hidden rounded-2xl border border-border/70 bg-background/95 backdrop-blur-xl lg:hidden"
+          >
+            <ul className="flex flex-col p-2">
+              {NAV.map((item) => (
+                <li key={item.label}>
+                  <a
+                    href={item.href}
+                    onClick={() => setMenuOpen(false)}
+                    className="label block rounded-xl px-4 py-4 text-muted-foreground transition-colors hover:bg-foreground/5 hover:text-foreground"
+                  >
+                    {item.label}
+                  </a>
+                </li>
+              ))}
+              <li className="p-2">
+                <a
+                  href="/console"
+                  onClick={() => setMenuOpen(false)}
+                  className="label block rounded-full bg-foreground px-5 py-4 text-center text-background"
+                >
+                  SCAN A WALLET
+                </a>
+              </li>
+            </ul>
+          </motion.nav>
+        ) : null}
+      </AnimatePresence>
+    </motion.header>
   )
 }

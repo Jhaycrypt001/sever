@@ -1,4 +1,5 @@
 import { cn } from '@/lib/utils'
+import { Reveal, RevealGroup, RevealItem } from '../motion/reveal'
 import { Display, Label, MetaRule, Shell } from './primitives'
 
 type Tier = 'SAFE' | 'WATCH' | 'DANGEROUS'
@@ -99,20 +100,27 @@ export function FindingsFeed() {
           right={`${dangerous} auto-revoked`}
         />
 
-        <div className="mt-10 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+        <Reveal className="mt-10 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <Label>One scan</Label>
           <Display
             lead="What it"
             trail="found"
             className="text-[2.5rem] sm:text-[3.25rem] md:text-[4rem]"
           />
-        </div>
+        </Reveal>
 
-        <ul className="mt-12 flex flex-col border-t border-border/60">
+        <RevealGroup
+          className="mt-12 flex flex-col border-t border-border/60"
+          stagger={0.05}
+        >
           {FINDINGS.map((f) => (
-            <li
+            <RevealItem
               key={`${f.time}-${f.spender}`}
-              className="group flex items-center gap-4 border-b border-border/60 py-5 transition-colors hover:bg-foreground/[0.03] sm:gap-8"
+              y={14}
+              // Wraps below `sm`: the fixed-width time, tier and allowance
+              // columns plus the spender add up to more than a 375px viewport,
+              // which pushed the whole page into a horizontal scroll.
+              className="group flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border/60 py-5 transition-colors hover:bg-foreground/[0.03] sm:flex-nowrap sm:gap-x-8"
             >
               <Label className="w-[4.5rem] shrink-0 tabular-nums sm:w-24">
                 {f.time}
@@ -142,16 +150,16 @@ export function FindingsFeed() {
                 />
               </span>
 
-              <span className="ml-auto shrink-0 font-mono text-xs text-muted-foreground transition-colors group-hover:text-foreground">
+              <span className="w-full shrink-0 font-mono text-xs text-muted-foreground transition-colors group-hover:text-foreground sm:ml-auto sm:w-auto">
                 {f.token} · {f.spender}
               </span>
-            </li>
+            </RevealItem>
           ))}
-        </ul>
+        </RevealGroup>
 
         <p className="mt-8 max-w-[62ch] text-pretty text-sm leading-relaxed text-muted-foreground">
           Only the three DANGEROUS rows were acted on. Watch and Safe are left
-          exactly where they are — an unverified contract is a reason to look,
+          exactly where they are. An unverified contract is a reason to look,
           not a reason to spend your gas.
         </p>
       </Shell>

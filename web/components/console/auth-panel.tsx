@@ -51,7 +51,7 @@ export function AuthPanel({
         </h1>
         <p className="text-xs leading-relaxed text-white/45">
           Scanning is read-only. The console never asks for a private key, a
-          seed phrase or a wallet signature — revocations are executed by
+          seed phrase or a wallet signature. Revocations are executed by
           KeeperHub.
         </p>
       </div>

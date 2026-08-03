@@ -2145,7 +2145,20 @@ the Vue app is retired rather than repaired.
    its whole run while the job had actually paused for input. The console now
    polls every 1.5s until the job is terminal and runs the stream alongside it,
    so silence costs latency instead of correctness.
-7. **The clarification path is reachable from a browser for the first time.**
+7. **A nonce-based CSP forces dynamic rendering, and the failure is silent.**
+   The nonce is minted per request in `proxy.ts`, but a prerendered page has
+   its nonce baked in at build time. The two never match, so the browser
+   blocks *every* script on that page: the markup renders, the header is
+   present, `npm run build` is green, and nothing runs. On the public page
+   that meant no hydration at all, and content that animates in stayed at
+   `opacity: 0` — a blank hero. Next only opts a route out of static rendering
+   when the route itself reads headers, which these do not, so `export const
+   dynamic = 'force-dynamic'` is declared in the root layout. The alternative,
+   relaxing `script-src` to `'unsafe-inline'`, was rejected: the console holds
+   a live access token in memory, and that is the surface the policy exists
+   for. `web/e2e/csp.spec.ts` now asserts that scripts actually execute, since
+   asserting on the header is what missed this in the first place.
+8. **The clarification path is reachable from a browser for the first time.**
    `FakeAgentPolicy` asked for clarification when the goal contained
    "ambiguous" (ADR-032). A dispatched goal is always `scan wallet <address>
    for risky token approvals`, and no EVM address can spell "ambiguous" — it is
@@ -2177,6 +2190,26 @@ superseded and are kept only as history — read them against this entry:
   `'self'`, because the console holds a live access token in memory.
 - **ADR-028**, Playwright specs — rewritten against `/console`; the suite moves
   to `web/e2e/` and drives the approval journey instead of the search timeline.
+  Two suites are added alongside it: `csp.spec.ts` (the page's JavaScript
+  actually executes under the policy) and `layout.spec.ts` (no horizontal
+  scroll at four widths; the walkthrough advances and rewinds with scroll).
+
+Two things the pivot left behind, found while verifying this work rather than
+by reading the code, are fixed here as well:
+
+- **`docker-compose.yml` never passed the onchain configuration to the worker.**
+  `KEEPERHUB_API_URL`, `KEEPERHUB_API_KEY`, `KEEPERHUB_SIMULATE_ONLY`,
+  `GOPLUS_API_KEY`, `AGENT_SCAN_CHAIN_IDS`, `AGENT_MAX_STEPS`,
+  `AGENT_MAX_COST_USD` and `AGENT_MODEL_FALLBACKS` were absent from the
+  `agent-worker` environment, while `TAVILY_API_KEY` from the old domain was
+  still being passed. The containerized worker could therefore only ever run
+  the keyless fakes; with `AGENT_PROVIDERS=live` it refused to boot. The
+  fail-fast of ADR-020 was working correctly and pointing at the operator for
+  a fault that was in compose.
+- **The findings feed and the stack wall pushed the page into a horizontal
+  scroll below 390px.** Fixed-width columns and an unbreakable component name
+  set a min-content width wider than the viewport. `web/e2e/layout.spec.ts`
+  pins "never scrolls sideways" at four widths.
 
 Next serialises `rewrites()` at build time, so the API target is a Docker build
 arg (`API_ORIGIN`) rather than a runtime variable — the one place this brick

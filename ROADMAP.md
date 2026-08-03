@@ -12,6 +12,15 @@ Manual setup and deployment steps live in [SETUP.md](SETUP.md).
       serves the public page at `/` and the operator console at `/console`,
       with the security headers moved from nginx into `web/proxy.ts` (now a
       nonce-based CSP, stricter than the policy it replaced).
+- [x] **The onchain configuration reaches the containerized worker (ADR-061)**
+      — done: `docker-compose.yml` never passed `KEEPERHUB_*`, `GOPLUS_API_KEY`
+      or `AGENT_SCAN_CHAIN_IDS` to `agent-worker`, and still passed
+      `TAVILY_API_KEY` from the old domain, so the full profile could only run
+      the keyless fakes.
+- [x] **The public page's JavaScript runs under the CSP (ADR-061)** — done:
+      a per-request nonce cannot match a prerendered page, so every script was
+      blocked and the page shipped as inert markup. All routes render per
+      request; `web/e2e/csp.spec.ts` asserts execution, not configuration.
 - [x] **Live updates converge even behind a buffering proxy (ADR-061)** — done:
       polling is unconditional and SSE runs alongside it. ADR-026 made polling
       the error-triggered fallback, which never fires when a proxy answers 200

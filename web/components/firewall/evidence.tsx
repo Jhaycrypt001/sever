@@ -7,6 +7,7 @@ import {
   SEPOLIA_TX_URL,
   truncateHash,
 } from '@/lib/proof'
+import { RevealGroup, RevealItem } from '../motion/reveal'
 import { Label, MetaRule, Shell } from './primitives'
 
 /**
@@ -68,9 +69,9 @@ export function Evidence() {
           right="No testimonials"
         />
 
-        <ul className="mt-12 grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3">
-          {/* 1 — the transaction */}
-          <li className="flex flex-col border border-border/60 bg-card/40">
+        <RevealGroup className="mt-12 grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-3" stagger={0.12}>
+          {/* 1: the transaction */}
+          <RevealItem className="flex h-full flex-col border border-border/60 bg-card/40">
             <Receipt>
               <p className="mb-1 text-[9px] uppercase tracking-[0.2em] text-white/40">
                 Sepolia · confirmed
@@ -86,7 +87,7 @@ export function Evidence() {
             <figure className="flex flex-1 flex-col p-6">
               <blockquote className="flex-1 text-pretty text-lg leading-snug tracking-tight text-foreground">
                 A real revocation, broadcast through KeeperHub and confirmed on
-                chain. Open it yourself — nothing here is a screenshot.
+                chain. Open it yourself; nothing here is a screenshot.
               </blockquote>
 
               <figcaption className="mt-8 flex flex-wrap items-center gap-2 border-t border-border/60 pt-4">
@@ -104,10 +105,10 @@ export function Evidence() {
                 View on Etherscan →
               </a>
             </figure>
-          </li>
+          </RevealItem>
 
-          {/* 2 — the decision rule */}
-          <li className="flex flex-col border border-border/60 bg-card/40">
+          {/* 2: the decision rule */}
+          <RevealItem className="flex h-full flex-col border border-border/60 bg-card/40">
             <Receipt>
               <p className="mb-1 text-[9px] uppercase tracking-[0.2em] text-white/40">
                 domain/models.py
@@ -136,7 +137,7 @@ export function Evidence() {
             <figure className="flex flex-1 flex-col p-6">
               <blockquote className="flex-1 text-pretty text-lg leading-snug tracking-tight text-foreground">
                 The entire rule that can authorise spending your gas. No model
-                sits in this path — a language model may describe a finding, but
+                sits in this path. A language model may describe a finding, but
                 it can never create one.
               </blockquote>
 
@@ -155,10 +156,10 @@ export function Evidence() {
                 Read the source →
               </a>
             </figure>
-          </li>
+          </RevealItem>
 
-          {/* 3 — the repository */}
-          <li className="flex flex-col border border-border/60 bg-card/40">
+          {/* 3: the repository */}
+          <RevealItem className="flex h-full flex-col border border-border/60 bg-card/40">
             <Receipt>
               <p className="mb-1 text-[9px] uppercase tracking-[0.2em] text-white/40">
                 Repository
@@ -193,8 +194,8 @@ export function Evidence() {
                 Read the decision log →
               </a>
             </figure>
-          </li>
-        </ul>
+          </RevealItem>
+        </RevealGroup>
       </Shell>
     </section>
   )
