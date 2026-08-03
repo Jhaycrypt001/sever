@@ -1,5 +1,5 @@
 import { REPO_URL, SEPOLIA_TX_URL } from '@/lib/proof'
-import { GlowPill, Label, MetaRule, Shell } from './primitives'
+import { GlowButton, Label, MetaRule, Shell } from './primitives'
 
 const COLUMNS = [
   {
@@ -71,7 +71,12 @@ export function SiteFooter() {
           you but the address.
         </p>
 
-        <form className="mx-auto mt-10 flex max-w-lg flex-col items-center gap-3 sm:flex-row sm:justify-center">
+        {/* A real GET to the console, which pre-fills from ?address=. */}
+        <form
+          action="/console"
+          method="get"
+          className="mx-auto mt-10 flex max-w-lg flex-col items-center gap-3 sm:flex-row sm:justify-center"
+        >
           <label htmlFor="scan-address" className="sr-only">
             Wallet address
           </label>
@@ -87,7 +92,7 @@ export function SiteFooter() {
             placeholder="0x…"
             className="h-[52px] w-full min-w-0 rounded-full border border-border/70 bg-card/40 px-6 font-mono text-sm text-foreground placeholder:text-muted-foreground focus:border-foreground/40 focus:outline-none sm:flex-1"
           />
-          <GlowPill href="#scan">Scan</GlowPill>
+          <GlowButton type="submit">Scan</GlowButton>
         </form>
 
         <p className="mt-5 text-center">

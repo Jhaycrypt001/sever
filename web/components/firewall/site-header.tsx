@@ -1,6 +1,6 @@
 'use client'
 
-import { Moon, X } from 'lucide-react'
+import { X } from 'lucide-react'
 import { useState } from 'react'
 import { REPO_URL, SEPOLIA_TX_URL } from '@/lib/proof'
 import { cn } from '@/lib/utils'
@@ -10,6 +10,7 @@ const NAV = [
   { label: 'HOW IT WORKS', href: '#product' },
   { label: 'EVIDENCE', href: '#evidence' },
   { label: 'PRICING', href: '#pricing' },
+  { label: 'CONSOLE', href: '/console' },
   { label: 'SOURCE', href: REPO_URL },
 ]
 
@@ -69,7 +70,6 @@ function Wordmark() {
 
 export function SiteHeader() {
   const [bannerOpen, setBannerOpen] = useState(true)
-  const [dark, setDark] = useState(true)
 
   return (
     <header className="absolute inset-x-0 top-0 z-50">
@@ -111,20 +111,13 @@ export function SiteHeader() {
             ))}
           </nav>
 
-          <button
-            type="button"
-            onClick={() => setDark((v) => !v)}
-            className="mx-2 text-muted-foreground transition-colors hover:text-foreground"
-          >
-            <Moon className="size-4" strokeWidth={1.5} />
-            <span className="sr-only">
-              {dark ? 'Switch to light theme' : 'Switch to dark theme'}
-            </span>
-          </button>
-
+          {/* The template had a theme toggle here. It only flipped a local
+              boolean — the page is committed to dark, down to hard-coded
+              surfaces in the CTA — so it was a control that did nothing.
+              Removed rather than faked. */}
           <a
-            href="#scan"
-            className="label rounded-full bg-foreground px-5 py-3 text-background transition-opacity hover:opacity-85"
+            href="/console"
+            className="label ml-2 rounded-full bg-foreground px-5 py-3 text-background transition-opacity hover:opacity-85"
           >
             SCAN A WALLET
           </a>

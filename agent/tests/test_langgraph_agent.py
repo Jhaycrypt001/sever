@@ -336,6 +336,35 @@ def test_recurring_run_flags_the_delta_and_journals_a_report() -> None:
     assert report.kind is AgentStepKind.REPORT and report.new_hits == 1
 
 
+def test_the_delta_report_does_not_reuse_a_revocation_seq() -> None:
+    """The `/steps` callback is idempotent on seq (ADR-030), so a report that
+    reuses a revoke step's seq is silently dropped by the backend. The report
+    numbered itself from the graph state, which never sees the revoke steps —
+    so a recurring run that revoked anything lost its delta report entirely.
+    Only reproducible with a revoker present, which the test above has not."""
+    source = MappedSource({"1": [approval("old"), approval("bad")]})
+    policy = ScriptedPolicy([ScanAction(chain_id="1", reason="r"), FinishAction(reason="done")])
+    sink, reporter = RecordingSink(), RecordingReporter()
+
+    run(
+        "job-13",
+        "goal",
+        source,
+        policy,
+        sink,
+        reporter,
+        threat_intel=TieredThreatIntel({"bad": RiskTier.DANGEROUS}),
+        revoker=RecordingRevoker(),
+        seen_keys={"1:0xtoken:old"},
+        max_steps=5,
+    )
+
+    seqs = [s.seq for s in reporter.steps]
+    assert len(seqs) == len(set(seqs)), f"duplicate step seq: {seqs}"
+    assert reporter.steps[-1].kind is AgentStepKind.REPORT
+    assert any(s.kind is AgentStepKind.REVOKE for s in reporter.steps)
+
+
 def test_scan_failure_reports_and_propagates() -> None:
     class ExplodingSource:
         def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:

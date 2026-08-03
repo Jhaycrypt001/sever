@@ -12,7 +12,7 @@ cp .env.example .env      # then fill in ANTHROPIC_API_KEY and TAVILY_API_KEY
 # rustup: https://rustup.rs — uv: https://docs.astral.sh/uv — node: nvm install 22
 
 cd agent && uv sync            # creates agent/.venv from uv.lock
-cd frontend && npm install    # creates frontend/node_modules
+cd web && npm install         # creates web/node_modules
 ```
 
 ---
@@ -20,7 +20,7 @@ cd frontend && npm install    # creates frontend/node_modules
 ## 1. Docker — full stack
 
 ```sh
-# Build and start everything (backend, agent API, worker, frontend, PostgreSQL, Redis)
+# Build and start everything (backend, agent API, worker, web, PostgreSQL, Redis)
 docker compose --profile full up --build
 
 # Same, detached
@@ -37,7 +37,7 @@ Entry points once up:
 
 | Service | URL |
 |---|---|
-| Frontend (nginx) | http://localhost:8080 |
+| Web (public page + console) | http://localhost:8080 (console: `/console`) |
 | Rust backend API | http://localhost:8000 (healthz: `/healthz`) |
 | API docs (Swagger UI) | http://localhost:8000/api/docs (raw spec: `/api/openapi.json`) — ADR-049 |
 | Agent FastAPI | http://localhost:8001 (healthz: `/healthz`) |
@@ -72,7 +72,7 @@ docker compose up -d postgres
 docker compose up -d redis
 docker compose --profile full up -d --build backend
 docker compose --profile full up -d --build agent-api agent-worker
-docker compose --profile full up -d --build frontend
+docker compose --profile full up -d --build web
 
 # Rebuild a single image without starting it
 docker compose --profile full build backend
@@ -113,8 +113,8 @@ uv run uvicorn aiagent.adapters.api.app:app --port 8001 --reload
 cd agent
 uv run celery -A aiagent.celery_app worker --loglevel=info
 
-# Frontend — http://localhost:5173 (proxies /api to :8000)
-cd frontend
+# Web — http://localhost:3000 (proxies /api to :8000; console at /console)
+cd web
 npm run dev
 ```
 
@@ -127,7 +127,7 @@ npm run dev
 ```sh
 cd backend && cargo test
 cd agent && uv run pytest
-cd frontend && npm test
+cd web && npm test
 ```
 
 ### Backend (Rust)
@@ -161,11 +161,11 @@ set -a && source ../.env && set +a
 RUN_LIVE_TESTS=1 uv run pytest tests/test_live_providers.py -v
 ```
 
-### Frontend (Vue)
+### Web (Next.js)
 
 ```sh
-cd frontend
-npm test                                    # single run (CI mode)
+cd web
+npm test                                    # contract fixtures, single run (CI mode)
 npx vitest                                  # watch mode
 npx vitest run src/components/__tests__/ResultTimeline.spec.ts   # one file
 ```
@@ -179,7 +179,7 @@ echo "RATE_LIMIT_AUTH_PER_MINUTE=100" >> .env  # e2e registers several accounts/
 echo "SCHEDULER_TICK_SECONDS=5" >> .env        # fast recurring-search runs (ADR-033)
 docker compose --profile full up -d --build --wait
 
-scripts/e2e-smoke.sh                        # register -> login -> search -> results
+scripts/e2e-smoke.sh                        # register -> login -> scan -> findings
 scripts/e2e-smoke.sh http://other-host:8080 # any base URL
 
 docker compose --profile full down          # teardown (remember to revert .env)
@@ -248,9 +248,9 @@ Same stack as the smoke script (boot it first, see above), driven through a
 real Chromium:
 
 ```sh
-cd frontend
+cd web
 npx playwright install chromium             # one-time browser download
-npm run test:e2e                            # register -> search -> timeline
+npm run test:e2e                            # register -> scan -> findings -> revocation
 E2E_BASE_URL=http://other-host:8080 npm run test:e2e   # any base URL
 npx playwright show-report                  # inspect a failed run
 ```
@@ -303,10 +303,9 @@ uv run ruff check .                         # lint (CI)
 uv run ruff check --fix .                   # lint + autofix
 uv run mypy src                             # typecheck (CI)
 
-# Frontend
-cd frontend
-npm run lint                                # eslint (CI)
-npm run typecheck                           # vue-tsc (CI)
+# Web
+cd web
+npm run typecheck                           # tsc --noEmit (CI)
 ```
 
 ---
@@ -317,13 +316,13 @@ npm run typecheck                           # vue-tsc (CI)
 # Release binaries (Rust)
 cd backend && cargo build --release         # target/release/backend + healthcheck
 
-# Production bundle (Vue)
-cd frontend && npm run build                # dist/
+# Production build (Next.js standalone server)
+cd web && npm run build                     # .next/standalone
 
 # Docker images, exactly as CI builds them
 docker build -t aiagent/backend ./backend
 docker build -t aiagent/agent ./agent
-docker build -t aiagent/frontend ./frontend
+docker build -t aiagent/web ./web
 
 # Diagrams: regenerate the committed SVG renders after editing a .puml
 # (index with all renders: docs/diagrams/README.md)
@@ -375,18 +374,18 @@ cd agent && uv add <package>                # add a dependency
 cd agent && uv add --group dev <package>    # add a dev dependency
 cd agent && uv lock --upgrade               # refresh uv.lock
 
-# Frontend
-cd frontend && npm install <package>
-cd frontend && npm update
+# Web
+cd web && npm install <package>
+cd web && npm update
 
 # Outdated report across the three bricks (native tools, no bot — ADR-022);
 # also run weekly by both CIs alongside the security audits
-scripts/deps-report.sh            # or: scripts/deps-report.sh backend|agent|frontend
+scripts/deps-report.sh            # or: scripts/deps-report.sh backend|agent|web
 
 # Security audits, exactly as the weekly CI runs them (ADR-015 amendment)
 cd backend && cargo audit         # exceptions: backend/.cargo/audit.toml (justified)
 cd agent && uv export --frozen --no-emit-project -o /tmp/req.txt && uvx pip-audit -r /tmp/req.txt
-cd frontend && npm audit --audit-level=high
+cd web && npm audit --audit-level=high
 ```
 
 `cargo audit` scans the lockfile, which lists optional dependencies that are

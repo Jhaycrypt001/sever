@@ -68,6 +68,12 @@ class FakeApprovalSource:
         ]
 
 
+#: Wallet address that makes `FakeAgentPolicy` ask for clarification once
+#: (ADR-032). Valid hex, so it can be submitted through the console — which is
+#: what makes the pause/answer/resume path testable in a browser at all.
+ASK_SENTINEL = "0x00000000000000000000000000000000000a5c00"
+
+
 class _FakeLlm:
     """Shared meter plumbing for the fake LLM-backed adapters (ADR-038)."""
 
@@ -118,10 +124,22 @@ class FakeAgentPolicy(_FakeLlm):
         self, goal: str, steps: list[AgentStep], approvals: list[RawApproval]
     ) -> AgentAction:
         self._count()
-        # Deterministic HITL trigger (ADR-032): a goal containing "ambiguous"
-        # asks for clarification once; the task appends the user's answer to
-        # the goal on resume, which disarms the trigger.
-        if len(steps) == 0 and "ambiguous" in goal and "(user clarification:" not in goal:
+        # Deterministic HITL trigger (ADR-032): asks for clarification once,
+        # then the task appends the user's answer to the goal on resume, which
+        # disarms the trigger.
+        #
+        # Two triggers, because the obvious one is unreachable in practice. A
+        # dispatched goal is always "scan wallet <address> for risky token
+        # approvals", and no EVM address can contain the word "ambiguous" — it
+        # is not hex. So the word-based trigger only ever fires from a unit
+        # test, and the clarification path was never exercised through the real
+        # product. ASK_SENTINEL is a valid address that a browser test can
+        # actually submit.
+        if (
+            len(steps) == 0
+            and "(user clarification:" not in goal
+            and (ASK_SENTINEL in goal.lower() or "ambiguous" in goal)
+        ):
             return AskAction(
                 question="Which chains should I scan — just Ethereum, or every supported chain?",
                 reason="The scan scope looks ambiguous; asking before spending calls",

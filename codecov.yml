@@ -19,12 +19,12 @@ flags:
     paths: [backend/]
   agent:
     paths: [agent/]
-  frontend:
-    paths: [frontend/]
+# web/ uploads no coverage: what it is worth testing there is the wire contract
+# (ADR-049) and the browser journey (ADR-028), and neither is a line-coverage
+# number. See ADR-061.
 
 # Thin wiring shells: their logic lives in tested library modules
-# (backend::config, backend::healthcheck; the frontend bootstrap) — ADR-023.
+# (backend::config, backend::healthcheck) — ADR-023.
 ignore:
   - backend/src/main.rs
   - "backend/src/bin/**"
-  - frontend/src/main.ts

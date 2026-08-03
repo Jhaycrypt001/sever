@@ -67,7 +67,7 @@ No code change, just env (`.env`, see `.env.example`):
 - **Pricing** for the spend cap (ADR-038/048): set `LLM_COST_*` to your model's
   rates (or `0` for a local model).
 
-## 4. The backend + frontend follow the result shape
+## 4. The backend + console follow the result shape
 
 The Rust backend is mostly domain-agnostic (jobs, auth, quotas, callbacks). The
 one coupling is the **result shape**, pinned on all three sides (ADR-049):
@@ -75,13 +75,13 @@ one coupling is the **result shape**, pinned on all three sides (ADR-049):
 1. `backend/src/domain/search_result.rs` — the `SearchResult` struct the backend
    stores and re-serves.
 2. `contracts/*.json` — the golden fixtures asserted on both languages + the
-   frontend. **Update these when you change the shape** — a drift breaks a test
+   console. **Update these when you change the shape** — a drift breaks a test
    instead of production.
-3. `frontend/src/api.ts` (zod schemas) and the Vue views/components that render
-   a result (`src/views/`, `src/components/`).
+3. `web/lib/api.ts` (zod schemas) and the console components that render a
+   finding (`web/components/console/`).
 
 Change the shape in these together; the contract tests (`backend/tests/contract.rs`,
-`agent/tests/test_contract.py`, `frontend/src/__tests__/contract.spec.ts`) tell
+`agent/tests/test_contract.py`, `web/lib/__tests__/contract.test.ts`) tell
 you if you missed a side.
 
 ## 5. Keep the guardrails (don't rip these out)
@@ -111,8 +111,8 @@ Each of these is optional; disable if your task has no use for it:
 
 - Agent Python package: `agent/pyproject.toml` `name`, the `agent/src/aiagent/`
   directory, and the `aiagent.` imports (a scoped find-and-replace).
-- The Rust crate (`backend`) and the frontend package (`frontend`) are generic
-  names — usually fine to leave.
+- The Rust crate (`backend`) and the web package (`web`) are generic names —
+  usually fine to leave.
 - Docker image names in `docker-compose.yml`, and the repo/URLs.
 
 ## Suggested order
@@ -122,7 +122,7 @@ Each of these is optional; disable if your task has no use for it:
 3. Rewrite the prompts + reply schemas in `llm.py`.
 4. Write your `SearchProvider` adapter (+ a keyless fake); wire it in `tasks.py`.
 5. Update the result shape across the three sides + the contract fixtures.
-6. Adapt the frontend views; set your env/keys; run the eval harness (ADR-045)
+6. Adapt the console components; set your env/keys; run the eval harness (ADR-045)
    on a few golden cases before shipping.
 
 Everything else — auth, the queue, retries, HITL, SSE, the spend cap, metrics,

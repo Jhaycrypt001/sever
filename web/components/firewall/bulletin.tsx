@@ -96,7 +96,7 @@ export function Bulletin() {
             </span>
           </p>
           <div className="flex flex-wrap items-center gap-x-8 gap-y-4">
-            <GlowPill href="#scan">Scan a wallet</GlowPill>
+            <GlowPill href="/console">Scan a wallet</GlowPill>
             <GhostLink href="#evidence">See the transaction</GhostLink>
           </div>
         </Shell>

@@ -1,6 +1,9 @@
 """Fake providers and provider selection (ADR-021/058)."""
 
+import re
+
 from aiagent.adapters.fake import (
+    ASK_SENTINEL,
     FakeAgentPolicy,
     FakeApprovalRevoker,
     FakeApprovalSource,
@@ -148,3 +151,23 @@ def test_fake_policy_asks_once_on_an_ambiguous_goal() -> None:
         'scan wallet 0xabc, ambiguous scope (user clarification: "ethereum only")', [], []
     )
     assert isinstance(resumed, ScanAction)
+
+
+def test_fake_policy_asks_on_the_sentinel_wallet() -> None:
+    # The "ambiguous" trigger above can only be reached from a unit test: a
+    # dispatched goal is "scan wallet <address> ...", and no EVM address can
+    # spell "ambiguous". The sentinel is valid hex, so the clarification path
+    # (ADR-032) is reachable through the real API and the browser.
+    goal = f"scan wallet {ASK_SENTINEL} for risky token approvals"
+    assert isinstance(FakeAgentPolicy().decide(goal, [], []), AskAction)
+
+
+def test_the_ask_sentinel_is_a_valid_evm_address() -> None:
+    # If this ever stops holding, the console's address validation silently
+    # makes the clarification e2e unreachable again.
+    assert re.fullmatch(r"0x[0-9a-fA-F]{40}", ASK_SENTINEL)
+
+
+def test_an_ordinary_wallet_never_pauses() -> None:
+    goal = "scan wallet 0x1234567890123456789012345678901234567890 for risky token approvals"
+    assert isinstance(FakeAgentPolicy().decide(goal, [], []), ScanAction)

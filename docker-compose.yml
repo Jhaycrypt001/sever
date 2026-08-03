@@ -145,13 +145,26 @@ services:
       timeout: 10s
       retries: 5
 
-  frontend:
+  # Public page + operator console (ADR-061). It proxies /api to the backend
+  # itself, so the browser sees one origin and the HttpOnly refresh cookie
+  # (ADR-008) is attached normally. Still on host port 8080, so the smoke
+  # script and the browser tests keep the same entry point.
+  web:
     profiles: ["full"]
-    build: ./frontend
+    build:
+      context: ./web
+      args:
+        # Next bakes rewrites at build time, so the API target is a build arg.
+        API_ORIGIN: http://backend:8000
     ports:
-      - "8080:80"
+      - "8080:3000"
     depends_on:
       - backend
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:3000/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   # OTLP entry point (ADR-050): one endpoint the bricks push to; it fans traces
   # to Jaeger and metrics to Prometheus. Point OTEL_EXPORTER_OTLP_ENDPOINT at

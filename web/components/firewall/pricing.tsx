@@ -196,7 +196,7 @@ function TicketCard({ t }: { t: Ticket }) {
         </div>
 
         <a
-          href="#scan"
+          href="/console"
           className={cn(
             'mt-8 inline-flex items-center justify-center rounded-full px-6 py-3.5 text-[0.9375rem] font-medium tracking-tight transition-opacity hover:opacity-85',
             inv

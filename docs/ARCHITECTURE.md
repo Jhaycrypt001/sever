@@ -2136,9 +2136,53 @@ the Vue app is retired rather than repaired.
    testimonials with stock portraits. All of it is removed. Everything the page
    asserts — the transaction hash, the gas figure, the classifier source — is
    sourced from `web/lib/proof.ts` and independently verifiable.
+6. **Polling is unconditional; SSE is the latency win on top.** ADR-026 made
+   polling the *fallback*, triggered when the stream fails. Building this
+   surfaced why that is not enough: a buffering proxy does not fail. It accepts
+   the connection, answers `200 text/event-stream`, and then delivers nothing.
+   An error-triggered fallback never fires, and the view freezes on whatever
+   the first fetch returned — observed here as a scan sitting at *Queued* for
+   its whole run while the job had actually paused for input. The console now
+   polls every 1.5s until the job is terminal and runs the stream alongside it,
+   so silence costs latency instead of correctness.
+7. **The clarification path is reachable from a browser for the first time.**
+   `FakeAgentPolicy` asked for clarification when the goal contained
+   "ambiguous" (ADR-032). A dispatched goal is always `scan wallet <address>
+   for risky token approvals`, and no EVM address can spell "ambiguous" — it is
+   not hex — so that trigger could only ever fire from a unit test, and an
+   existing test comment said as much. `ASK_SENTINEL`, a valid address, is now
+   a second trigger, which is what lets the pause/answer/resume dialog be
+   driven end to end.
 
-**Consequence**: `frontend/` is deleted; docker-compose, nginx and CI build
-`web/`. The Playwright suite (ADR-028) is rewritten against the new routes.
+**Consequence**: `frontend/` is deleted. The following rows of earlier ADRs are
+superseded and are kept only as history — read them against this entry:
+
+- **ADR-003** (Vue 3 + Vite) — replaced wholesale by Next.js 16 + React 19 +
+  Tailwind v4.
+- **ADR-012**, testing table, `frontend/` row — `vitest` + `@vue/test-utils` +
+  `msw` becomes `vitest` over the shared contract fixtures (`web/lib/__tests__`)
+  plus the Playwright journey. No component-level mocking layer: what is worth
+  pinning on this surface is the wire shape and the real browser flow.
+- **ADR-014**, image table, "Vue frontend" row — no longer `nginx:alpine` over
+  static files. The console server-renders, so the runtime image is
+  `node:22-alpine` running Next's standalone server, and it proxies `/api`
+  itself. The nginx re-resolution rule in that ADR no longer applies to
+  anything, because there is no nginx in the path.
+- **ADR-015**, stage table, `frontend/` column — the lint stage is `tsc
+  --noEmit` (no eslint config ships with the template), and the published image
+  is `$CI_REGISTRY_IMAGE/web`.
+- **ADR-054**, app security headers — previously added by nginx, now set by
+  `web/proxy.ts` on every app response. The policy is *stricter* than the one it
+  replaces: `script-src` is nonce-based with `strict-dynamic` rather than
+  `'self'`, because the console holds a live access token in memory.
+- **ADR-028**, Playwright specs — rewritten against `/console`; the suite moves
+  to `web/e2e/` and drives the approval journey instead of the search timeline.
+
+Next serialises `rewrites()` at build time, so the API target is a Docker build
+arg (`API_ORIGIN`) rather than a runtime variable — the one place this brick
+breaks the "configuration comes exclusively from environment variables at run
+time" rule of ADR-014, and it is recorded here rather than left to be
+discovered.
 
 ---
 

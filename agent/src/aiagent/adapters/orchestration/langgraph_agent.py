@@ -364,8 +364,16 @@ def _deliver(
     approvals = [_approval_from_dict(a) for a in state["approvals"]]
     findings = sort_by_risk(resolve_approvals(approvals, threat_intel))
 
+    # `revoke_dangerous` appends one step per revocation to this list, so it has
+    # to be the thing the report step numbers itself against. Deriving the seq
+    # from `state["steps"]` instead looked equivalent and was not: the graph
+    # state does not see the revoke steps, so the report reused the first
+    # revocation's seq, and the callback is idempotent on seq (ADR-030) — the
+    # delta report was silently dropped on every recurring run that revoked
+    # anything.
+    steps = [_step_from_dict(s) for s in state["steps"]]
+
     if revoker is not None:
-        steps = [_step_from_dict(s) for s in state["steps"]]
         findings = revoke_dangerous(job_id, findings, revoker, reporter, steps)
 
     if seen_keys is not None:
@@ -377,7 +385,7 @@ def _deliver(
             else "Nothing new since the last scan"
         )
         report = AgentStep(
-            seq=len(state["steps"]) + 1,
+            seq=steps[-1].seq + 1 if steps else 1,
             kind=AgentStepKind.REPORT,
             detail="",
             reason=reason,

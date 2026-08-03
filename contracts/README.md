@@ -17,15 +17,16 @@ of the suites instead of surfacing in the e2e test (or production).
 | `usage-callback.json` | agent (`serialize_usage`) | backend (`POST /internal/jobs/{id}/usage`) |
 | `digest-webhook.json` | backend (`WebhookDigestSender`) | the user's systems (Slack, n8n…) |
 
-**Public contract** — Rust backend → Vue frontend (ADR-049):
+**Public contract** — Rust backend → Next.js console (ADR-049/061):
 
 | Fixture | Producer (serializes exactly this) | Consumer (validates this) |
 |---|---|---|
-| `search-job-detail.json` | backend (`job_detail_json`, `GET /api/searches/{id}`) | frontend (`searchJobDetailSchema`) |
-| `recurring-search.json` | backend (`recurring_search_json`, `/api/recurring`) | frontend (`recurringSearchSchema`) |
+| `search-job-detail.json` | backend (`job_detail_json`, `GET /api/searches/{id}`) | web (`scanJobDetailSchema`) |
+| `recurring-search.json` | backend (`recurring_search_json`, `/api/recurring`) | web (`recurringScanSchema`) |
+| `results-callback.json` | agent (`serialize_result`) | web (`approvalFindingSchema`) — the same findings are re-served on the public route |
 
 Tests: `backend/tests/contract.rs`, `agent/tests/test_contract.py`, and
-`frontend/src/__tests__/contract.spec.ts`. The frontend validates with the
-`zod` schemas that back `api.ts` (runtime validation, not just types) and
+`web/lib/__tests__/contract.test.ts`. The console validates with the `zod`
+schemas that back `lib/api.ts` (runtime validation, not just types) and
 **tolerates unknown fields** — an additive backend change is stripped, not
-rejected, so an older frontend keeps working during a rolling deploy (ADR-049).
+rejected, so an older console keeps working during a rolling deploy (ADR-049).

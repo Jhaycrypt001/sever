@@ -26,12 +26,18 @@ export function Hero() {
         </p>
 
         <div className="mt-10 flex flex-wrap items-center gap-x-8 gap-y-4">
-          <GlowPill href="#scan">Scan a wallet</GlowPill>
+          <GlowPill href="/console">Scan a wallet</GlowPill>
           <GhostLink href="#evidence">See the transaction</GhostLink>
         </div>
       </Shell>
 
-      {/* tilted console */}
+      {/*
+        Tilted console. The figures inside it are sample data, and the page
+        says so rather than letting a stylised screenshot imply a userbase —
+        the same reason the template's borrowed customer logos and invented
+        testimonials are gone. The verifiable numbers are in the evidence
+        section, sourced from lib/proof.
+      */}
       <div
         aria-hidden="true"
         className="pointer-events-none relative mt-[-2rem] h-[420px] select-none md:h-[560px] lg:h-[680px]"
@@ -52,6 +58,12 @@ export function Hero() {
           <DashboardMock />
         </div>
       </div>
+
+      <Shell className="relative z-10 -mt-10 md:-mt-16">
+        <p className="label text-center text-muted-foreground">
+          Console interface · sample data · the real transaction is below
+        </p>
+      </Shell>
     </section>
   )
 }

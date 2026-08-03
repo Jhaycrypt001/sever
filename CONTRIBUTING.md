@@ -41,7 +41,7 @@ Run the same checks CI runs:
 ```sh
 cd backend && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 cd agent && uv run ruff check . && uv run ruff format --check . && uv run mypy src && uv run pytest
-cd frontend && npm run lint && npm run typecheck && npm test
+cd web && npm run typecheck && npm test
 ```
 
 PostgreSQL integration tests need the compose service:

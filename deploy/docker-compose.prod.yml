@@ -17,7 +17,7 @@ services:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
     depends_on:
-      - frontend
+      - web
       - backend
 
   backend:
@@ -43,8 +43,8 @@ services:
       LOG_FORMAT: json
       APP_ENV: production
 
-  frontend:
-    image: ${CI_REGISTRY_IMAGE}/frontend:${IMAGE_TAG}
+  web:
+    image: ${CI_REGISTRY_IMAGE}/web:${IMAGE_TAG}
     build: !reset null
     ports: !reset []
 

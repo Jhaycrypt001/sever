@@ -18,7 +18,7 @@ labels: bug
 
 ## Environment
 
-- Brick: backend / agent / frontend / infra
+- Brick: backend / agent / web / infra
 - How you run it: local dev / `--profile full` / VPS
 - OS + versions (rustc / python / node / docker):
 

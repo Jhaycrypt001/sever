@@ -116,45 +116,45 @@ agent:test:
     - uv run pytest --cov=aiagent --cov-report=term
   coverage: '/TOTAL.*? (\d+)%/'
 
-# ---------------------------------------------------------------- frontend (Vue)
-.frontend-rules: &frontend-rules
+# ---------------------------------------------------------------- web (Next.js)
+.web-rules: &web-rules
   rules:
     - *not-on-schedule
     - changes:
-        - frontend/**/*
+        - web/**/*
         - .gitlab-ci.yml
 
-frontend:lint:
+web:lint:
   stage: lint
   image: node:22-alpine
-  <<: *frontend-rules
+  <<: *web-rules
   cache:
     key:
-      files: [frontend/package-lock.json]
-    paths: [frontend/node_modules/]
+      files: [web/package-lock.json]
+    paths: [web/node_modules/]
   script:
-    - cd frontend
+    - cd web
     - npm ci
-    - npm run lint
     - npm run typecheck
 
-frontend:test:
+web:test:
   stage: test
   image: node:22-alpine
-  needs: ["frontend:lint"]
-  <<: *frontend-rules
+  needs: ["web:lint"]
+  <<: *web-rules
   cache:
     key:
-      files: [frontend/package-lock.json]
-    paths: [frontend/node_modules/]
+      files: [web/package-lock.json]
+    paths: [web/node_modules/]
   script:
-    - cd frontend
+    - cd web
     - npm ci
-    - npm test -- --coverage --coverage.reporter=text
-  coverage: '/All files\s*\|\s*([\d.]+)/'
+    # Consumer side of the cross-language contract (ADR-049).
+    - npm test
 
 # ---------------------------------------------------------------- e2e (full stack)
-# Full compose stack with fake providers (ADR-021) + smoke script through nginx.
+# Full compose stack with fake providers (ADR-021) + smoke script through the
+# Next.js server, which proxies /api to the backend (ADR-061).
 e2e:
   stage: test
   image: docker:27-cli
@@ -181,14 +181,14 @@ e2e:
     - scripts/e2e-smoke.sh http://docker:8080
     # Browser tests (ADR-028) inside the official Playwright image, run on the
     # dind daemon: --network host shares dind's network, where the stack's
-    # ports are published (nginx on :8080). $CI_PROJECT_DIR is not visible
+    # ports are published (web on :8080). $CI_PROJECT_DIR is not visible
     # from dind, so the sources are docker-cp'd in. Keep the image tag in
-    # sync with @playwright/test in frontend/package.json.
+    # sync with @playwright/test in web/package.json.
     - >
       docker create --name playwright --network host
       -e CI=1 -e E2E_BASE_URL=http://localhost:8080
       mcr.microsoft.com/playwright:v1.61.1-noble
-      bash -c "cd /repo/frontend && npm ci && npx playwright test"
+      bash -c "cd /repo/web && npm ci && npx playwright test"
     - docker cp "$CI_PROJECT_DIR" playwright:/repo
     - docker start -a playwright
   after_script:
@@ -241,19 +241,19 @@ agent:build:
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG
       changes: [agent/**/*, .gitlab-ci.yml]
 
-frontend:build:
+web:build:
   <<: *kaniko-build
-  needs: ["frontend:test"]
+  needs: ["web:test"]
   variables:
-    COMPONENT: frontend
-    IMAGE_NAME: frontend
+    COMPONENT: web
+    IMAGE_NAME: web
   rules:
     - *not-on-schedule
     - if: $CI_PIPELINE_SOURCE == "merge_request_event"
-      changes: [frontend/**/*, .gitlab-ci.yml]
+      changes: [web/**/*, .gitlab-ci.yml]
       variables: { EXTRA_ARGS: "--no-push" }
     - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH || $CI_COMMIT_TAG
-      changes: [frontend/**/*, .gitlab-ci.yml]
+      changes: [web/**/*, .gitlab-ci.yml]
 
 # ---------------------------------------------------------------- publish `latest`
 .publish-latest: &publish-latest
@@ -278,10 +278,10 @@ agent:publish:
   needs: ["agent:build"]
   variables: { IMAGE_NAME: agent }
 
-frontend:publish:
+web:publish:
   <<: *publish-latest
-  needs: ["frontend:build"]
-  variables: { IMAGE_NAME: frontend }
+  needs: ["web:build"]
+  variables: { IMAGE_NAME: web }
 
 # ---------------------------------------------------------------- deploy (VPS, manual)
 deploy:vps:
@@ -354,7 +354,7 @@ security:npm-audit:
   <<: *audit-rules
   image: node:22-alpine
   script:
-    - cd frontend
+    - cd web
     - npm audit --audit-level=high
 
 security:trivy:
@@ -368,7 +368,7 @@ security:trivy:
   script:
     - trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "$CI_REGISTRY_IMAGE/backend:latest"
     - trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "$CI_REGISTRY_IMAGE/agent:latest"
-    - trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "$CI_REGISTRY_IMAGE/frontend:latest"
+    - trivy image --severity HIGH,CRITICAL --exit-code 1 --ignore-unfixed "$CI_REGISTRY_IMAGE/web:latest"
 
 # Outdated-dependencies report (ADR-022): informative, native tools only.
 deps-report:cargo:
@@ -389,4 +389,4 @@ deps-report:npm:
   before_script:
     - apk add --no-cache bash
   script:
-    - scripts/deps-report.sh frontend
+    - scripts/deps-report.sh web

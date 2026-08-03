@@ -6,6 +6,17 @@ Manual setup and deployment steps live in [SETUP.md](SETUP.md).
 
 ## P1 — Core reliability (before real usage)
 
+- [x] **One frontend: Next.js `web/` (ADR-061, replaces ADR-003)** — done: the
+      Vue SPA still spoke the pre-ADR-058 API (`keyword`, `published_at`) and
+      could not complete a scan, so it was deleted rather than ported. `web/`
+      serves the public page at `/` and the operator console at `/console`,
+      with the security headers moved from nginx into `web/proxy.ts` (now a
+      nonce-based CSP, stricter than the policy it replaced).
+- [x] **Live updates converge even behind a buffering proxy (ADR-061)** — done:
+      polling is unconditional and SSE runs alongside it. ADR-026 made polling
+      the error-triggered fallback, which never fires when a proxy answers 200
+      and then delivers nothing — the console froze at `pending` for a whole
+      run. Silence is now treated as failure.
 - [x] **PostgreSQL adapter** (sqlx, ADR-007) — done. PostgreSQL whenever
       `DATABASE_URL` is set (migrations at startup), in-memory fallback
       otherwise; integration tests against compose locally / GitLab service in CI.

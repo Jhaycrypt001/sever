@@ -18,8 +18,8 @@
     },
     {
       "matchUpdateTypes": ["minor", "patch"],
-      "matchFileNames": ["frontend/**"],
-      "groupName": "frontend non-major"
+      "matchFileNames": ["web/**"],
+      "groupName": "web non-major"
     }
   ]
 }

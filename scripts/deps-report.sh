@@ -4,7 +4,7 @@
 # it tells you what an upgrade would change; applying it stays a human action
 # (see docs/COMMANDS.md §9).
 #
-# Usage: scripts/deps-report.sh [backend|agent|frontend|all]   (default: all)
+# Usage: scripts/deps-report.sh [backend|agent|web|all]   (default: all)
 set -euo pipefail
 
 COMPONENT="${1:-all}"
@@ -23,23 +23,23 @@ report_agent() {
   (cd "$ROOT/agent" && uv lock --upgrade --dry-run 2>&1) || true
 }
 
-report_frontend() {
-  section "frontend — npm outdated"
+report_web() {
+  section "web — npm outdated"
   # npm outdated exits 1 whenever something is outdated: informative, not an error.
-  (cd "$ROOT/frontend" && npm outdated) || true
+  (cd "$ROOT/web" && npm outdated) || true
 }
 
 case "$COMPONENT" in
   backend) report_backend ;;
   agent) report_agent ;;
-  frontend) report_frontend ;;
+  web) report_web ;;
   all)
     report_backend
     report_agent
-    report_frontend
+    report_web
     ;;
   *)
-    echo "usage: $0 [backend|agent|frontend|all]" >&2
+    echo "usage: $0 [backend|agent|web|all]" >&2
     exit 2
     ;;
 esac

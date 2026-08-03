@@ -15,17 +15,15 @@ agent/.mypy_cache/
 agent/.ruff_cache/
 
 # Node
-frontend/node_modules/
-frontend/dist/
-frontend/coverage/
 web/node_modules/
 web/.next/
 web/out/
 web/next-env.d.ts
+web/*.tsbuildinfo
 
 # Playwright (ADR-028)
-frontend/test-results/
-frontend/playwright-report/
+web/test-results/
+web/playwright-report/
 
 # IDE / OS
 .idea/

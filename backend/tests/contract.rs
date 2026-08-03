@@ -373,7 +373,8 @@ async fn backend_consumes_the_usage_callback_fixture() {
 /// The public API's exact wire shape (ADR-049): the backend PRODUCES the
 /// `GET /api/searches/{id}` detail and the `/api/recurring` payload; the
 /// fixtures pin them so a Rust rename/field change breaks this suite instead of
-/// silently reaching the frontend. The frontend side asserts the same fixtures.
+/// silently reaching the console. The console asserts the same fixtures
+/// (`web/lib/__tests__/contract.test.ts`).
 #[tokio::test]
 async fn backend_produces_the_public_contract_fixtures() {
     use backend::adapters::http::{job_detail_json, recurring_search_json};

@@ -125,6 +125,35 @@ export function GlowPill({
   )
 }
 
+/** The GlowPill treatment on a real <button> — for forms that actually submit. */
+export function GlowButton({
+  children,
+  className,
+  ...props
+}: React.ComponentProps<'button'>) {
+  return (
+    <button
+      className={cn(
+        'group relative inline-flex shrink-0 items-center justify-center rounded-full',
+        className,
+      )}
+      {...props}
+    >
+      <span
+        aria-hidden="true"
+        className="absolute -inset-[3px] rounded-full opacity-70 blur-[6px] transition-opacity duration-300 group-hover:opacity-100"
+        style={{
+          background:
+            'conic-gradient(from 210deg, #6ee7ff, #a78bfa, #fb7185, #fbbf24, #34d399, #6ee7ff)',
+        }}
+      />
+      <span className="relative flex items-center rounded-full border border-white/15 bg-[#0b0b0b] px-7 py-3.5 text-[0.9375rem] font-medium tracking-tight text-white shadow-[inset_0_1px_0_rgba(255,255,255,0.14)]">
+        {children}
+      </span>
+    </button>
+  )
+}
+
 export function GhostLink({
   children,
   className,

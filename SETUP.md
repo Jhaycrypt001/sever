@@ -30,14 +30,14 @@ docs/COMMANDS.md.
 ## 3. GitHub repository (ADR-019)
 
 - [ ] Fill in the repo **description** and add topics (`rust`, `axum`,
-      `langchain`, `celery`, `vuejs`, `hexagonal-architecture`, `ai-agents`,
+      `langchain`, `celery`, `nextjs`, `hexagonal-architecture`, `ai-agents`,
       `boilerplate`).
 - [ ] Push `main` and check the first `CI` workflow run: lint + test green for
       the three bricks; image builds succeed (not pushed on PRs).
 - [ ] **Branch protection on `main`** (Settings → Rules → Rulesets, or
       Branches): require a pull request (1 approval, dismiss stale approvals),
       require status checks — select `backend (lint + test)`,
-      `agent (lint + test)`, `frontend (lint + test)` — require conversation
+      `agent (lint + test)`, `web (lint + test)` — require conversation
       resolution, block force pushes. Grant yourself bypass on the approval
       rule if you maintain solo.
 - [ ] **Merge methods** (Settings → General → Pull Requests): enable **squash
