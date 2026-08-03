@@ -58,8 +58,23 @@ function along(node: (typeof NODES)[number], t: number) {
   }
 }
 
-export function ApprovalMap() {
-  const reduce = useReducedMotion()
+/**
+ * `animated={false}` renders the same plate with no running animation. Used
+ * behind the sign-in form: a decorative SVG that sweeps and pulses forever
+ * under a login box burns CPU for the whole time someone is typing a
+ * password, and it is the one screen where nothing should be competing for
+ * attention.
+ */
+export function ApprovalMap({
+  animated = true,
+  legend = true,
+}: {
+  animated?: boolean
+  /** Off when the map is a backdrop and something else owns the caption. */
+  legend?: boolean
+}) {
+  const prefersReduced = useReducedMotion()
+  const reduce = prefersReduced || !animated
 
   return (
     <svg
@@ -238,7 +253,12 @@ export function ApprovalMap() {
       </g>
 
       {/* legend */}
-      <g fontFamily="var(--font-mono), monospace" fontSize="8" letterSpacing="1.2">
+      <g
+        fontFamily="var(--font-mono), monospace"
+        fontSize="8"
+        letterSpacing="1.2"
+        display={legend ? undefined : 'none'}
+      >
         <text x="24" y="466" fill="rgba(255,255,255,0.35)">
           {COUNT} SPENDERS
         </text>

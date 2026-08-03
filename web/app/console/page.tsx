@@ -1,6 +1,5 @@
 import type { Metadata } from 'next'
 import { ConsoleApp } from '@/components/console/console-app'
-import { Shell } from '@/components/firewall/primitives'
 
 export const metadata: Metadata = {
   title: 'Console · Approval Firewall',
@@ -23,11 +22,11 @@ export default async function ConsolePage({
   const initialAddress =
     candidate && /^0x[a-fA-F0-9]{40}$/.test(candidate) ? candidate : ''
 
+  // No Shell here: the signed-out screen is full-bleed, and the workspace
+  // applies its own. Wrapping both would box the auth plate into a column.
   return (
     <div className="dark min-h-screen bg-background text-foreground">
-      <Shell className="py-8 md:py-12">
-        <ConsoleApp initialAddress={initialAddress} />
-      </Shell>
+      <ConsoleApp initialAddress={initialAddress} />
     </div>
   )
 }

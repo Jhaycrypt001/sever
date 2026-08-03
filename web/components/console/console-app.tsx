@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '@/lib/api'
+import { Shell } from '@/components/firewall/primitives'
 import { AuthPanel } from './auth-panel'
 import { Workspace } from './workspace'
 
@@ -83,7 +84,7 @@ export function ConsoleApp({
 
   if (restoring) {
     return (
-      <p className="py-24 text-center font-mono text-xs text-white/35">
+      <p className="flex min-h-[100svh] items-center justify-center font-mono text-xs text-white/35">
         Restoring session…
       </p>
     )
@@ -92,11 +93,13 @@ export function ConsoleApp({
   if (!token) return <AuthPanel onAuthenticated={authenticate} />
 
   return (
-    <Workspace
-      call={call}
-      token={token}
-      initialAddress={initialAddress}
-      onSignOut={signOut}
-    />
+    <Shell className="py-8 md:py-12">
+      <Workspace
+        call={call}
+        token={token}
+        initialAddress={initialAddress}
+        onSignOut={signOut}
+      />
+    </Shell>
   )
 }

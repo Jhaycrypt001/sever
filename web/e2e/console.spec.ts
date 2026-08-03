@@ -16,7 +16,9 @@ async function register(page: Page, email: string) {
   await page.goto('/console')
   await page.getByRole('button', { name: 'No account? Create one' }).click()
   await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password').fill(PASSWORD)
+  // `exact` matters: the reveal toggle's accessible name is "Show password",
+  // which a substring match also picks up.
+  await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
   await page.getByRole('button', { name: 'Create account' }).click()
   await expect(page.getByLabel('Wallet to scan')).toBeVisible()
 }
@@ -228,7 +230,9 @@ test('a returning user signs back in and finds the previous scans', async ({
   await page.context().clearCookies()
   await page.goto('/console')
   await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password').fill(PASSWORD)
+  // `exact` matters: the reveal toggle's accessible name is "Show password",
+  // which a substring match also picks up.
+  await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
   await page.getByRole('button', { name: 'Sign in' }).click()
 
   await expect(page.getByTestId('scan-detail')).toBeVisible()
@@ -256,7 +260,9 @@ test('the public page hands a pasted address to the console', async ({
   const email = uniqueEmail()
   await page.getByRole('button', { name: 'No account? Create one' }).click()
   await page.getByLabel('Email').fill(email)
-  await page.getByLabel('Password').fill(PASSWORD)
+  // `exact` matters: the reveal toggle's accessible name is "Show password",
+  // which a substring match also picks up.
+  await page.getByLabel('Password', { exact: true }).fill(PASSWORD)
   await page.getByRole('button', { name: 'Create account' }).click()
 
   await expect(page.getByLabel('Wallet to scan')).toHaveValue(WALLET)
