@@ -45,12 +45,13 @@ const REVOKED = [
   { i: 'SC', n: 'Scam airdrop', e: '0x4d88…c2e1 · XYZ', a: 'revoked' },
 ]
 
+// The three chains the approval source actually serves (ADR-066). Sample
+// numbers, real chain names — a mock listing networks we cannot read would
+// still be a coverage claim, caption or no caption.
 const CHAINS = [
   { r: 'Ethereum', p: 44 },
-  { r: 'Base', p: 21 },
-  { r: 'Arbitrum', p: 15 },
-  { r: 'Polygon', p: 11 },
-  { r: 'Sepolia', p: 9 },
+  { r: 'Base', p: 27 },
+  { r: 'BNB Chain', p: 19 },
 ]
 
 const SPENDERS = [
@@ -75,10 +76,10 @@ const LEDGER = [
   ['0x7c41d9…e0b2', 'USDC', 'Ethereum', 'revoked', '46,118', '02:54:11'],
   ['0x2be8a1…4f7c', 'DAI', 'Base', 'pending', 'n/a', '02:51:47'],
   ['0x93fd0c…7a19', 'COW', 'Ethereum', 'revoked', '44,902', '02:47:26'],
-  ['0x51ac77…bb03', 'XYZ', 'Polygon', 'failed', 'n/a', '02:41:58'],
-  ['0xe0177b…9d44', 'WETH', 'Arbitrum', 'revoked', '48,301', '02:38:12'],
+  ['0x51ac77…bb03', 'XYZ', 'BNB Chain', 'failed', 'n/a', '02:41:58'],
+  ['0xe0177b…9d44', 'WETH', 'BNB Chain', 'revoked', '48,301', '02:38:12'],
   ['0x6a2c19…30fe', 'USDT', 'Base', 'simulated', 'n/a', '02:33:05'],
-  ['0xb84f30…1c77', 'ARB', 'Arbitrum', 'revoked', '45,760', '02:29:44'],
+  ['0xb84f30…1c77', 'ARB', 'Ethereum', 'revoked', '45,760', '02:29:44'],
 ]
 
 const JOURNAL = [

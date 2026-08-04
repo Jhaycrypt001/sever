@@ -1,20 +1,42 @@
 # Approval Firewall
 
-**An agent that finds the token approvals draining your wallet and revokes them
-onchain, through [KeeperHub](https://keeperhub.io).**
+**Paste a wallet address. It finds every token approval that address has ever
+granted, works out which ones can drain it, and revokes those onchain — no
+signature, no seed phrase, no gas from you.**
 
 [![Rust](https://img.shields.io/badge/Rust-stable-B7410E?logo=rust)](backend/)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](agent/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)](web/)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
-[![ADRs](https://img.shields.io/badge/ADRs-61-8A2BE2)](docs/ARCHITECTURE.md)
+[![ADRs](https://img.shields.io/badge/ADRs-67-8A2BE2)](docs/ARCHITECTURE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Every token approval you have ever signed is still live. Most drains are not
-a new exploit — they are an old `approve()` being called months later, by a
-contract you forgot you trusted. Nothing in a wallet tells you which of those
-are dangerous, and revoking one by hand costs gas and attention you will not
-spend.
+## In 30 seconds
+
+**The problem.** Every `approve()` you have ever signed is still live. Most
+drains are not a new exploit — they are an old approval being called months
+later by a contract you forgot you trusted. Your wallet does not tell you which
+ones are dangerous, and clearing them by hand costs gas and attention you will
+not spend.
+
+**What this does.**
+
+1. Reads every outstanding ERC-20 approval for an address, across Ethereum,
+   BNB Chain and Base.
+2. Tiers each spender `SAFE` / `WATCH` / `DANGEROUS` with a plain function over
+   verified threat-intel signals — **not** with a language model.
+3. Sends `approve(spender, 0)` for the dangerous ones through
+   [KeeperHub](https://keeperhub.com), which relays and pays the gas.
+4. Reads the allowance back off the chain to prove it is actually zero.
+
+**Why you can believe it.** A real revocation on Base mainnet, decided by the
+classifier with nobody in the loop:
+[`0x62204d65…2cef2a`](https://basescan.org/tx/0x62204d6591a117404d295e959b746a0bf10e812b4973bf8f92e427adee2cef2a).
+The allowance it cleared now reads `0`. Scanning is read-only and needs nothing
+from you but the address.
+
+**Try it.** `docker compose --profile full up -d --build`, then
+<http://localhost:8080>. Full setup in [docs/COMMANDS.md](docs/COMMANDS.md).
 
 Approval Firewall scans a wallet's outstanding ERC-20 approvals, classifies
 every spender, and **auto-revokes the dangerous ones as real onchain

@@ -1,3 +1,4 @@
+import { SUPPORTED_CHAINS } from '@/lib/proof'
 import { Reveal, RevealGroup, RevealItem } from '../motion/reveal'
 import { Display, Label, MetaRule, Shell } from './primitives'
 
@@ -22,7 +23,10 @@ const STACK = [
   { name: 'OpenTelemetry', role: 'traces, metrics, logs' },
 ]
 
-const CHAINS = ['Ethereum', 'Base', 'Arbitrum', 'Polygon', 'Sepolia']
+// Derived, never re-typed: this list was a hardcoded copy that still claimed
+// Arbitrum, Polygon and Sepolia long after the approval source stopped
+// serving them (ADR-066).
+const CHAINS = SUPPORTED_CHAINS.map((c) => c.name)
 
 export function StackWall() {
   return (

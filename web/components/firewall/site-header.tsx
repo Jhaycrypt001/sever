@@ -7,10 +7,11 @@ import { REPO_URL, SEPOLIA_TX_URL } from '@/lib/proof'
 import { cn } from '@/lib/utils'
 
 const NAV = [
-  { label: 'HOME', href: '#', active: true },
+  { label: 'HOME', href: '/', active: true },
   { label: 'HOW IT WORKS', href: '#product' },
   { label: 'EVIDENCE', href: '#evidence' },
-  { label: 'PRICING', href: '#pricing' },
+  { label: 'COST', href: '#pricing' },
+  { label: 'DOCS', href: '/docs' },
   { label: 'CONSOLE', href: '/console' },
   { label: 'SOURCE', href: REPO_URL },
 ]
