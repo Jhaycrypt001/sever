@@ -277,6 +277,28 @@ then returns the code in its own response and the console pre-fills the box, so
 no mailbox is involved. With a real key set, these tests cannot pass — the code
 goes to an inbox instead.
 
+**The browser suite cannot run against a live-provider stack.** It asserts the
+deterministic fakes of ADR-021 (one dangerous, one watch, one safe per chain),
+and it registers ~20 accounts in a few minutes. Booting with the live
+mainnet configuration therefore fails ~10 of the 22 tests for two reasons that
+have nothing to do with the code:
+
+- `AGENT_PROVIDERS=live` — a freshly generated test wallet has no real
+  approvals, so every findings assertion fails;
+- `RATE_LIMIT_AUTH_PER_MINUTE=10` (the production-ish default) — the suite
+  trips the per-IP auth limiter partway through and the rest 429.
+
+Always boot with the overrides below, which shadow `.env` without editing it:
+
+```sh
+AGENT_PROVIDERS=fake RATE_LIMIT_AUTH_PER_MINUTE=1000 \
+LOGIN_MAX_ATTEMPTS_PER_MINUTE=1000 DAILY_SEARCH_QUOTA=1000 \
+docker compose --profile full up -d --build
+```
+
+A red suite straight after a live demo is almost always this, not a regression
+— check `docker compose exec agent-worker sh -c 'echo $AGENT_PROVIDERS'` first.
+
 ### Worker console (Flower — ADR-040, opt-in)
 
 ```sh

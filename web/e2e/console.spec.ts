@@ -71,11 +71,26 @@ async function launchScan(page: Page, mode: keyof typeof MODE) {
   await page.getByRole('button', { name: 'Scan', exact: true }).click()
 }
 
+/**
+ * How long a launched scan may take to reach `completed`.
+ *
+ * Generous on purpose. The Celery worker runs `--pool=solo` (a Windows
+ * requirement), so it handles exactly one job at a time while Playwright runs
+ * tests in parallel — a scan can therefore sit in the queue behind another
+ * test's job before it even starts. The observed failure is a job still at
+ * `pending`, which is queueing, not slowness in the code under test.
+ *
+ * This is patience, not tolerance for a bug: `completed` still has to arrive,
+ * and every assertion after it is unchanged. Thirty seconds was enough for two
+ * chains and became marginal at three (ADR-066 added BSC).
+ */
+const COMPLETION_TIMEOUT_MS = 90_000
+
 async function waitForCompletion(page: Page) {
   await expect(page.getByTestId('run-status')).toHaveAttribute(
     'data-status',
     'completed',
-    { timeout: 30_000 },
+    { timeout: COMPLETION_TIMEOUT_MS },
   )
 }
 
@@ -135,7 +150,7 @@ test('a still-live approval is never presented as neutralised', async ({
   await expect(page.getByTestId('run-status')).toHaveAttribute(
     'data-status',
     'completed',
-    { timeout: 30_000 },
+    { timeout: COMPLETION_TIMEOUT_MS },
   )
 
   // Every honest label for a still-live allowance. `simulated` in particular
@@ -178,7 +193,7 @@ test('the agent streams its decision journal', async ({ page }) => {
   await expect(page.getByTestId('run-status')).toHaveAttribute(
     'data-status',
     'completed',
-    { timeout: 30_000 },
+    { timeout: COMPLETION_TIMEOUT_MS },
   )
 
   await page.getByRole('button', { name: /^Journal/ }).click()
@@ -212,7 +227,7 @@ test('the agent asks for clarification and resumes with the answer', async ({
 
   const status = page.getByTestId('run-status')
   await expect(status).toHaveAttribute('data-status', 'awaiting_input', {
-    timeout: 30_000,
+    timeout: COMPLETION_TIMEOUT_MS,
   })
   await expect(page.getByText('Which chains should I scan')).toBeVisible()
 
@@ -220,7 +235,7 @@ test('the agent asks for clarification and resumes with the answer', async ({
   await page.getByRole('button', { name: 'Answer' }).click()
 
   await expect(status).toHaveAttribute('data-status', 'completed', {
-    timeout: 30_000,
+    timeout: COMPLETION_TIMEOUT_MS,
   })
   await expect(page.getByTestId('finding').first()).toHaveAttribute(
     'data-tier',
@@ -257,7 +272,7 @@ test('a returning user signs back in and finds the previous scans', async ({
   await expect(page.getByTestId('run-status')).toHaveAttribute(
     'data-status',
     'completed',
-    { timeout: 30_000 },
+    { timeout: COMPLETION_TIMEOUT_MS },
   )
 
   // Fresh browser state = the HttpOnly refresh cookie is gone (ADR-008):

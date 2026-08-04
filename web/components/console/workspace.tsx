@@ -605,8 +605,9 @@ function ScanDetail({
             data-testid="degraded-notice"
             className="rounded border border-red-500/25 bg-red-500/[0.08] px-3 py-2 font-mono text-[10px] uppercase tracking-[0.08em] text-red-300"
           >
-            Incomplete scan · {unscannedChains.join(', ')} could not be reached ·
-            counts below do not cover {unscannedChains.length > 1 ? 'those chains' : 'that chain'}
+            Incomplete scan · {unscannedChains.map(chainName).join(' · ')} could
+            not be reached · counts below do not cover{' '}
+            {unscannedChains.length > 1 ? 'those chains' : 'that chain'}
           </p>
         ) : null}
 
