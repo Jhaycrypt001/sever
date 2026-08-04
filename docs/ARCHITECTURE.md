@@ -2475,10 +2475,18 @@ they are facts about GoPlus's behaviour rather than about our code.
    the chain is reported unscanned (ADR-064 marks it `degraded`) rather than
    delivering a half-built approval list as a finished sweep. An incomplete
    list rendered as a complete one is a coverage lie in the ADR-059 family.
-3. **Arbitrum (42161) and Polygon (137) are dropped from the default chains.**
-   The endpoint answers `code 2029` with a null message for both, on every
-   attempt. They were in `.env.example`'s suggested list, so the documented
-   default would have shown two permanently unreachable chains on every scan.
+3. **The scannable chain list is exactly Ethereum, BSC and Base.** Probed live
+   across 17 chain ids: everything else answers `2018` ("Main chain does not
+   exist") or `2029`. Arbitrum and Polygon were in `.env.example`'s suggested
+   default, so the documented configuration would have reported two
+   permanently unreachable chains on every scan. BSC was *missing* from it and
+   is free coverage, so the default is now `1,56,8453`.
+
+   **Sepolia (11155111) is not scannable either.** KeeperHub executes there
+   happily — the first proof transaction was on Sepolia — but GoPlus holds no
+   approval data for it, so a testnet wallet always scans empty. Execution and
+   detection do not cover the same chains, and only their intersection
+   (Ethereum, BSC, Base) is a working end-to-end product.
 4. **An explanation describes the risk, never the action.** The DANGEROUS
    sentence ended `"Revoking automatically."` — written by the threat-intel
    port, which runs *before* anything is executed and is shared by both modes.

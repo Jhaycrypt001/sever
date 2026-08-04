@@ -23,10 +23,29 @@ funding and never signs anything.
 
 ## Proof it executes
 
-A real revocation, broadcast and confirmed on Sepolia:
+A real revocation on **Base mainnet**, decided by the classifier and broadcast
+without a human in the loop:
 
-**[`0xa3e2b054752adda3aa9696a6d5460ac40c9670e34044da276b62ee10d9822c28`](https://sepolia.etherscan.io/tx/0xa3e2b054752adda3aa9696a6d5460ac40c9670e34044da276b62ee10d9822c28)**
-— 75,255 gas, 7.9 s from decision to confirmation, gas sponsored by KeeperHub.
+**[`0x62204d6591a117404d295e959b746a0bf10e812b4973bf8f92e427adee2cef2a`](https://basescan.org/tx/0x62204d6591a117404d295e959b746a0bf10e812b4973bf8f92e427adee2cef2a)**
+
+The target was an unlimited WETH allowance to `Conduit`
+(`0x1e0049783f008a0085193e00003d00cd54003c71`), which GoPlus flags
+`honeypot_related_address` — a real spender, not a fixture. The agent scanned,
+tiered it DANGEROUS, and revoked it. Independently verified afterwards, rather
+than taken from our own status field:
+
+```
+eth_call allowance(wallet, Conduit) on WETH/Base
+→ 0x0000000000000000000000000000000000000000000000000000000000000000
+```
+
+Earlier, the same path on Sepolia:
+[`0xa3e2b054…9822c28`](https://sepolia.etherscan.io/tx/0xa3e2b054752adda3aa9696a6d5460ac40c9670e34044da276b62ee10d9822c28)
+— 75,255 gas, 7.9 s from decision to confirmation.
+
+Gas on both was paid by KeeperHub's relayer, not the protected wallet — the
+execution response says `"sponsored": true`, and the Base wallet held 0 ETH
+throughout.
 
 ## The part that matters: an LLM cannot authorize a transaction
 
