@@ -36,6 +36,27 @@ export function addressUrl(chainId: string, address: string): string | null {
   return chain ? `${chain.explorer}/address/${address}` : null
 }
 
+/**
+ * Where the owner of a wallet can revoke an approval themselves.
+ *
+ * Sever can only execute for the one wallet delegated to KeeperHub
+ * (ADR-065), and it deliberately never auto-revokes a WATCH finding. So most
+ * findings, for most people, end in "this is still live" with nothing to click
+ * — the scan names a problem and then abandons them.
+ *
+ * revoke.cash is the established tool for doing it by hand, it covers all
+ * three chains this scans, and it connects a wallet to write the transaction —
+ * which is precisely the step this product refuses to ask for. Sending someone
+ * there is more useful than a dead end, and more honest than pretending we can
+ * finish the job (ADR-070).
+ */
+export function revokeUrl(chainId: string, walletAddress: string): string | null {
+  // Only for chains it actually supports; a link that lands on the wrong
+  // network is worse than none.
+  if (!CHAINS[chainId]) return null
+  return `https://revoke.cash/address/${walletAddress}?chainId=${chainId}`
+}
+
 /** `0x1234…abcd` — enough to recognise an address without wrapping a table cell. */
 export function truncateAddress(address: string, lead = 6, tail = 4): string {
   if (address.length <= lead + tail + 1) return address

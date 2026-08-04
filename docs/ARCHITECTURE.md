@@ -2624,6 +2624,46 @@ rather than claiming an action (ADR-066) — which no drawing would have.
 
 ---
 
+### ADR-070 — A still-live allowance always offers a way out (decided 2026-08-04, follows ADR-065)
+
+**Context**: found by scanning a stranger's wallet, which is the thing the
+product invites everybody to do. `0x57B97f…Ab2db` came back with four dangerous
+approvals, two of them to a spender GoPlus flags `phishing_activities` and
+`stealing_attack`, holding live allowances on that person's USDC on two chains.
+
+The console showed them, labelled them *allowance still spendable* — and then
+offered nothing. No button, no link, no next step. ADR-065 means Sever can only
+execute for the single wallet delegated to KeeperHub, and ADR-058 means a WATCH
+finding is never auto-revoked even for that wallet. So for almost every visitor,
+almost every row, the product named a danger and abandoned them at it.
+
+That is a worse failure than it looks. A security tool that reports a live
+drainer approval and provides no remedy has converted a person who did not know
+into a person who knows and is stuck.
+
+**Decision**: every finding whose allowance is still live links out to
+`revoke.cash`, scoped to the scanned wallet and the right chain.
+
+1. **Shown for every still-live state, not only DANGEROUS.** WATCH is
+   deliberately never auto-revoked; those rows need the link most, because
+   nothing else will ever clear them.
+2. **It is labelled as leaving.** *"Revoke it yourself ↗"*, opening in a new
+   tab. revoke.cash will ask to connect a wallet — the exact step this product
+   refuses to ask for — so it is not dressed up as one of our own controls.
+3. **Never rendered for a chain we do not map**, because a revoke link that
+   lands on the wrong network is worse than no link.
+4. **Absent once genuinely revoked.** The link is the answer to "still live";
+   when that stops being true the row stops asking for anything.
+
+**Consequences**: the product sends people to a competitor, and that is the
+correct trade. Sever's claim is that it *finds* what a wallet cannot show you;
+pretending it can also fix everybody's wallet would require either a wallet
+connection it has promised not to ask for, or a lie about what KeeperHub can
+execute. Linking out keeps both promises and still leaves the visitor better
+off than they arrived.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)

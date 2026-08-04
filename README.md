@@ -8,7 +8,7 @@ signature, no seed phrase, no gas from you.**
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](agent/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)](web/)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
-[![ADRs](https://img.shields.io/badge/ADRs-69-8A2BE2)](docs/ARCHITECTURE.md)
+[![ADRs](https://img.shields.io/badge/ADRs-70-8A2BE2)](docs/ARCHITECTURE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## In 30 seconds

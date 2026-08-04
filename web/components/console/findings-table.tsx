@@ -1,7 +1,13 @@
 'use client'
 
 import type { ApprovalFinding } from '@/lib/api'
-import { addressUrl, chainName, truncateAddress, txUrl } from '@/lib/chains'
+import {
+  addressUrl,
+  chainName,
+  revokeUrl,
+  truncateAddress,
+  txUrl,
+} from '@/lib/chains'
 import { cn } from '@/lib/utils'
 import { RevocationBadge, TierBadge, isStillLive } from './status'
 
@@ -9,7 +15,13 @@ import { RevocationBadge, TierBadge, isStillLive } from './status'
  * Findings arrive already sorted most-dangerous-first (ADR-058) — the console
  * does not re-rank them, so what is shown is what the classifier decided.
  */
-export function FindingsTable({ findings }: { findings: ApprovalFinding[] }) {
+export function FindingsTable({
+  findings,
+  walletAddress,
+}: {
+  findings: ApprovalFinding[]
+  walletAddress: string
+}) {
   if (findings.length === 0) {
     return (
       <p className="px-4 py-10 text-center font-mono text-xs text-white/35">
@@ -21,18 +33,29 @@ export function FindingsTable({ findings }: { findings: ApprovalFinding[] }) {
   return (
     <ul data-testid="findings" className="divide-y divide-white/[0.06]">
       {findings.map((f) => (
-        <FindingRow key={`${f.chain_id}:${f.token_address}:${f.spender_address}`} f={f} />
+        <FindingRow
+          key={`${f.chain_id}:${f.token_address}:${f.spender_address}`}
+          f={f}
+          walletAddress={walletAddress}
+        />
       ))}
     </ul>
   )
 }
 
-function FindingRow({ f }: { f: ApprovalFinding }) {
+function FindingRow({
+  f,
+  walletAddress,
+}: {
+  f: ApprovalFinding
+  walletAddress: string
+}) {
   const spender = addressUrl(f.chain_id, f.spender_address)
   const receipt = f.revocation_tx_hash
     ? txUrl(f.chain_id, f.revocation_tx_hash)
     : null
   const unlimited = /^unlimited$/i.test(f.approved_amount)
+  const manualRevoke = revokeUrl(f.chain_id, walletAddress)
 
   return (
     <li
@@ -134,6 +157,33 @@ function FindingRow({ f }: { f: ApprovalFinding }) {
           <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-red-300/80">
             allowance still spendable
           </span>
+        ) : null}
+
+        {/*
+          The way out (ADR-070). Shown on anything still live, which includes
+          every WATCH finding even for the delegated wallet, because WATCH is
+          deliberately never auto-revoked. Without this the console names a
+          live allowance and then offers nothing to do about it.
+
+          It leaves the product, and says so. revoke.cash will ask to connect a
+          wallet — the step Sever refuses to ask for — so it is labelled rather
+          than dressed up as one of our own buttons.
+        */}
+        {isStillLive(f.revocation_status) && manualRevoke ? (
+          <a
+            data-testid="manual-revoke"
+            href={manualRevoke}
+            target="_blank"
+            rel="noreferrer noopener"
+            className={cn(
+              'font-mono text-[10px] uppercase tracking-[0.08em] underline decoration-white/25 underline-offset-2 transition-colors',
+              f.tier === 'dangerous'
+                ? 'text-red-300 hover:text-red-200'
+                : 'text-white/45 hover:text-white',
+            )}
+          >
+            Revoke it yourself ↗
+          </a>
         ) : null}
       </div>
     </li>

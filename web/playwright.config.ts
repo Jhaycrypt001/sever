@@ -26,6 +26,14 @@ export default defineConfig({
   // Every assertion here waits on a real backend round trip through the
   // console's proxy; the 5s default is tight enough to flake on a cold worker.
   expect: { timeout: 15_000 },
+  // Longer than console.spec's COMPLETION_TIMEOUT_MS (90s), on purpose. The
+  // default is 30s, which is *shorter* — so a test waiting out its full
+  // completion budget was killed by the test timeout first and the 90s was
+  // dead code. It went unnoticed while scans happened to finish inside 30s,
+  // then failed the whole console file at once when the queue grew: the
+  // worker runs Celery's solo pool (one job at a time, ADR-024), so scans
+  // serialize no matter how many browser workers are running.
+  timeout: 150_000,
   use: {
     baseURL: process.env.E2E_BASE_URL ?? 'http://localhost:8080',
     trace: 'on-first-retry',

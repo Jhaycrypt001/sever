@@ -119,6 +119,27 @@ test('a report-only scan lists the findings by risk and revokes nothing', async 
   )
   await expect(page.locator('[data-revocation="revoked"]')).toHaveCount(0)
   await expect(dangerous).toContainText('allowance still spendable')
+
+  // ADR-070: naming a live allowance obliges us to offer a way out. A
+  // report-only run is the case that matters most — nothing here was revoked,
+  // so every row needs one, not just the dangerous ones.
+  const live = page.locator(
+    '[data-testid="finding"]:not([data-revocation="revoked"])',
+  )
+  const liveCount = await live.count()
+  expect(liveCount).toBeGreaterThan(0)
+  for (let i = 0; i < liveCount; i++) {
+    await expect(live.nth(i).getByTestId('manual-revoke')).toBeVisible()
+  }
+
+  // It leaves the product, and points at the scanned wallet on the right
+  // chain — a link that lands on the wrong network is worse than none.
+  const out = live.first().getByTestId('manual-revoke')
+  const href = await out.getAttribute('href')
+  expect(href).toContain('revoke.cash')
+  expect(href).toContain(WALLET)
+  expect(href).toMatch(/chainId=\d+/)
+  await expect(out).toHaveAttribute('target', '_blank')
 })
 
 test('an auto-revoke scan revokes the dangerous approval and shows the receipt', async ({
@@ -138,6 +159,14 @@ test('an auto-revoke scan revokes the dangerous approval and shows the receipt',
   await expect(page.locator('[data-tier="watch"]').first()).toContainText(
     'Not revoked',
   )
+
+  // ADR-070, the other half: the link answers "this is still live", so once a
+  // row is genuinely revoked it stops asking for anything. The WATCH row is
+  // deliberately never auto-revoked, so it keeps its way out.
+  await expect(dangerous.getByTestId('manual-revoke')).toHaveCount(0)
+  await expect(
+    page.locator('[data-tier="watch"]').first().getByTestId('manual-revoke'),
+  ).toBeVisible()
 })
 
 test('a still-live approval is never presented as neutralised', async ({
@@ -431,3 +460,4 @@ test('the old password stops working after a reset', async ({ page }) => {
     'invalid credentials',
   )
 })
+

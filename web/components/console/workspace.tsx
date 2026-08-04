@@ -665,7 +665,10 @@ function ScanDetail({
       </div>
 
       {tab === 'findings' ? (
-        <FindingsTable findings={detail.results} />
+        <FindingsTable
+          findings={detail.results}
+          walletAddress={detail.wallet_address}
+        />
       ) : (
         <Journal steps={detail.steps} />
       )}

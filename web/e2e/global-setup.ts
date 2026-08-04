@@ -95,5 +95,74 @@ export default async function globalSetup() {
     )
   }
 
+  // Prove the worker is on the fakes, rather than trusting that whoever booted
+  // the stack passed the override. Nothing above catches this: registration
+  // and rate limits behave identically either way, and a `--build web` that
+  // recreates only one service leaves the worker on whatever `.env` says.
+  //
+  // The fake source answers for any address; the live one answers for a
+  // freshly generated address with nothing at all. So one scan of a random
+  // address separates them, and it costs a few seconds once per run.
+  const token = (
+    (await (
+      await api.post('/api/auth/verify', {
+        data: { email, code: body.verification_code },
+      })
+    ).json()) as { access_token: string }
+  ).access_token
+
+  const probeWallet = '0x' + 'a1b2c3d4'.repeat(5)
+  const launched = (await (
+    await api.post('/api/searches', {
+      data: { wallet_address: probeWallet, mode: 'workflow' },
+      headers: { authorization: `Bearer ${token}` },
+    })
+  ).json()) as { job_id: string }
+
+  if (!launched.job_id) {
+    bail(
+      'The probe scan was not accepted for dispatch.',
+      'Check `docker compose logs backend` — the API rejected a valid scan request.',
+    )
+  }
+
+  const DEADLINE_MS = 60_000
+  const startedAt = Date.now()
+  let settled = false
+  while (Date.now() - startedAt < DEADLINE_MS) {
+    const detail = (await (
+      await api.get(`/api/searches/${launched.job_id}`, {
+        headers: { authorization: `Bearer ${token}` },
+      })
+    ).json()) as { status?: string; results?: unknown[] }
+
+    if (detail.status === 'completed') {
+      if (!detail.results || detail.results.length === 0) {
+        bail(
+          'A scan of a random unused address returned no findings.',
+          'The worker is on the LIVE providers. The suite asserts the deterministic fakes of ADR-021.',
+        )
+      }
+      settled = true
+      break
+    }
+    if (detail.status === 'failed') {
+      bail(
+        'A probe scan failed outright.',
+        'Check `docker compose logs agent-worker` — the worker cannot reach its providers.',
+      )
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+
+  // Falling through the loop used to continue silently, which would have made
+  // this whole check decorative in exactly the case it exists for.
+  if (!settled) {
+    bail(
+      `A probe scan never finished within ${DEADLINE_MS / 1000}s.`,
+      'The worker is not consuming the queue — check `docker compose logs agent-worker`.',
+    )
+  }
+
   await api.dispose()
 }
