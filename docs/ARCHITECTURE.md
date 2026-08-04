@@ -2510,6 +2510,48 @@ been rendered from live data.
 
 ---
 
+### ADR-067 — A scan states which chains it covered (decided 2026-08-04, extends ADR-064/066)
+
+**Context**: ADR-064 made a chain that *failed* visible. Nothing made a chain
+that was *never attempted* visible. The approval source serves three chains
+(ADR-066) out of the ~30 a wallet can hold ERC-20 approvals on, so the console
+could show **0 dangerous approvals** for a wallet that has plenty — just not on
+Ethereum, BSC or Base.
+
+Verified on the wallet used for the mainnet demo: it holds four `Approval`
+events on Arbitrum, two distinct tokens including USDC. The product had no way
+to see them and, worse, no way to say it had not looked. "Clean" and "clean
+where we looked" are different claims, and only the second one was ever true.
+
+**Decision**: every run journals the chains it covered, not only the ones that
+broke.
+
+1. **Workflow mode emits a `scan` step per covered chain.** It previously
+   emitted none, so its journal was empty and its coverage unknowable. Agent
+   mode already did this as a side effect of the loop; now both modes carry
+   the same evidence.
+2. **The console states coverage next to the counts**: *"Covered Ethereum ·
+   BNB Chain · Base · approvals on other networks were not examined."* It is
+   derived from the journal steps, so it cannot drift from what actually ran.
+3. **It is stated on every run, not only partial ones.** A notice that appears
+   only when something went wrong trains people to read its absence as full
+   coverage — which is exactly the wrong inference here.
+
+**Consequences**: the honest ceiling of the product is now visible in the
+product. That is a weaker-sounding page and a truer one; the alternative was a
+green "0 dangerous" that a user could reasonably read as "my wallet is safe".
+
+Widening the ceiling is a separate piece of work: GoPlus splits the problem
+into *enumeration* (`token_approval_security`, three chains) and *spender
+threat intel* (`approval_security`, verified working on Polygon, Arbitrum,
+Optimism, Avalanche and Scroll). Classification is therefore already
+chain-wide; only enumeration is missing, and `eth_getLogs` for `Approval`
+topics returns it — confirmed against a public Arbitrum RPC. A second
+`ApprovalSource` adapter doing that, composed per chain, is the designed
+extension point and needs no change to the port.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)

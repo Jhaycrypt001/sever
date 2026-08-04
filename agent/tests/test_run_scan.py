@@ -216,11 +216,16 @@ def test_an_unreachable_chain_is_recorded_in_the_journal() -> None:
         reporter=reporter,
     )
 
-    assert len(reporter.steps) == 1
-    _, step = reporter.steps[0]
-    assert step.kind == "degraded"
-    assert step.detail == "8453"
-    assert "rate limited" in step.reason
+    # ADR-067: both halves of the coverage story are journalled — the chain
+    # that worked and the chain that did not. Recording only failures leaves
+    # "0 dangerous" meaning "clean" instead of "clean where we looked".
+    kinds = {step.kind: step for _, step in reporter.steps}
+    assert set(kinds) == {"scan", "degraded"}
+    assert kinds["scan"].detail == "1"
+    assert kinds["degraded"].detail == "8453"
+    assert "rate limited" in kinds["degraded"].reason
+    seqs = [step.seq for _, step in reporter.steps]
+    assert len(seqs) == len(set(seqs)), f"journal seqs must be unique: {seqs}"
 
 
 def test_every_chain_failing_fails_the_job_rather_than_reporting_clean() -> None:

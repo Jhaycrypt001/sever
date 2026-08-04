@@ -72,6 +72,31 @@ def _report_degraded(
         logger.warning("could not report the degraded step for chain %s", chain_id)
 
 
+def _report_scanned(
+    reporter: StepReporter | None,
+    job_id: str,
+    seq: int,
+    chain_id: str,
+    found: int,
+) -> None:
+    """Records a chain that *was* covered (ADR-067), best effort."""
+    if reporter is None:
+        return
+    try:
+        reporter.report_step(
+            job_id,
+            AgentStep(
+                seq=seq,
+                kind=AgentStepKind.SCAN,
+                detail=chain_id,
+                reason="chain scanned",
+                new_hits=found,
+            ),
+        )
+    except Exception:  # noqa: BLE001 - a failed report never fails the job
+        logger.warning("could not report the scan step for chain %s", chain_id)
+
+
 def run_scan(
     job_id: str,
     wallet_address: str,
@@ -100,14 +125,24 @@ def run_scan(
         approvals: list[RawApproval] = []
         failures: list[str] = []
         last_error: Exception | None = None
+        seq = 0
         for chain_id in chain_ids:
+            seq += 1
             try:
-                approvals.extend(source.fetch_approvals(wallet_address, chain_id))
+                found = source.fetch_approvals(wallet_address, chain_id)
             except Exception as exc:  # noqa: BLE001 - one chain must not sink the run
                 logger.warning("chain %s could not be scanned: %s", chain_id, exc)
                 failures.append(f"{chain_id}: {exc}")
                 last_error = exc
-                _report_degraded(reporter, job_id, len(failures), chain_id, exc)
+                _report_degraded(reporter, job_id, seq, chain_id, exc)
+                continue
+            approvals.extend(found)
+            # ADR-067: record what *was* covered, not only what failed. Without
+            # this a workflow run has an empty journal, and "0 dangerous
+            # approvals" reads as "this wallet is clean" when it means "clean
+            # on the chains we happened to look at" — and the approval source
+            # covers three of the ~30 chains a wallet can hold approvals on.
+            _report_scanned(reporter, job_id, seq, chain_id, len(found))
         if failures and len(failures) == len(chain_ids):
             # The causes travel with it: "no chain could be scanned" alone
             # tells an operator nothing they can act on, and this string is

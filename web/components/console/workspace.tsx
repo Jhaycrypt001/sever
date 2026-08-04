@@ -11,7 +11,7 @@ import {
   type ScanJob,
   type ScanJobDetail,
 } from '@/lib/api'
-import { truncateAddress } from '@/lib/chains'
+import { chainName, truncateAddress } from '@/lib/chains'
 import { cn } from '@/lib/utils'
 import { FindingsTable } from './findings-table'
 import { Journal } from './journal'
@@ -522,6 +522,22 @@ function ScanDetail({
     return [...new Set(chains)]
   }, [detail])
 
+  /**
+   * The chains this run actually covered (ADR-067).
+   *
+   * Stated because the counts above are only true *of these chains*. A wallet
+   * can hold approvals on any EVM network; the approval source covers three.
+   * Without this line "0 dangerous" reads as "you are safe", when it means
+   * "safe on the three we looked at" — the same shape of omission ADR-064
+   * fixed for chains that failed, applied to chains never attempted.
+   */
+  const scannedChains = useMemo(() => {
+    const chains = (detail?.steps ?? [])
+      .filter((s) => s.kind === 'scan' && s.detail)
+      .map((s) => s.detail)
+    return [...new Set(chains)]
+  }, [detail])
+
   if (!selectedId) {
     return (
       <section className="rounded-lg border border-white/[0.08] bg-white/[0.015] px-6 py-20 text-center">
@@ -591,6 +607,16 @@ function ScanDetail({
           >
             Incomplete scan · {unscannedChains.join(', ')} could not be reached ·
             counts below do not cover {unscannedChains.length > 1 ? 'those chains' : 'that chain'}
+          </p>
+        ) : null}
+
+        {scannedChains.length > 0 ? (
+          <p
+            data-testid="coverage-notice"
+            className="font-mono text-[10px] uppercase tracking-[0.08em] text-white/35"
+          >
+            Covered {scannedChains.map(chainName).join(' · ')} · approvals on
+            other networks were not examined
           </p>
         ) : null}
 
