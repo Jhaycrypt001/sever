@@ -402,43 +402,53 @@ async fn security_events_record_list_newest_first_and_purge() {
     let user = insert_user(&pool).await;
     let audit = PostgresSecurityAudit::new(pool);
 
-    // Clean slate: this is the only test writing security_events, and
-    // list_recent is a global operator view, so wipe first for a deterministic
-    // count (the shared DB persists rows between runs).
-    audit
-        .delete_before(Utc::now() + chrono::Duration::days(1))
-        .await
-        .unwrap();
-
+    // `list_recent` and `delete_before` are both **global** operator views, and
+    // this database is shared with whatever else is running against it — a
+    // compose backend recording its own failed logins, another test binary,
+    // a previous run. So this test tags its rows and asserts only on those.
+    //
+    // It used to wipe the table first and assert absolute counts. That was
+    // wrong twice over: the counts raced with any concurrent writer (observed
+    // as a ~1-in-4 flake during a full `cargo test` with the stack up), and
+    // the wipe destroyed the real audit log of a running application.
+    let tag = user.id;
     let mut old = SecurityEvent::new(
         SecurityEventKind::LoginFailed,
         None,
         Some("1.2.3.4".into()),
-        "old",
+        format!("old-{tag}"),
     );
     old.created_at = Utc::now() - chrono::Duration::days(120);
     let recent = SecurityEvent::new(
         SecurityEventKind::RefreshReuseDetected,
         Some(user.id),
         None,
-        "recent",
+        format!("recent-{tag}"),
     );
     audit.record(&old).await.unwrap();
     audit.record(&recent).await.unwrap();
 
-    // Newest first.
-    let listed = audit.list_recent(10).await.unwrap();
-    assert_eq!(listed.len(), 2);
-    assert_eq!(listed[0].detail, "recent");
+    // Newest first, among the rows this test owns.
+    let ours = |events: Vec<SecurityEvent>| -> Vec<SecurityEvent> {
+        events
+            .into_iter()
+            .filter(|e| e.detail.ends_with(&tag.to_string()))
+            .collect()
+    };
+    let listed = ours(audit.list_recent(500).await.unwrap());
+    assert_eq!(listed.len(), 2, "both rows should come back");
+    assert_eq!(listed[0].detail, format!("recent-{tag}"));
     assert_eq!(listed[0].user_id, Some(user.id));
     assert_eq!(listed[1].client_ip.as_deref(), Some("1.2.3.4"));
 
-    // Retention purge drops only the old one.
+    // Retention purge drops the old one and spares the recent one. The return
+    // value counts every row past the cutoff, including other writers', so the
+    // assertion is on the effect rather than on the number.
     let cutoff = Utc::now() - chrono::Duration::days(90);
-    assert_eq!(audit.delete_before(cutoff).await.unwrap(), 1);
-    let remaining = audit.list_recent(10).await.unwrap();
+    assert!(audit.delete_before(cutoff).await.unwrap() >= 1);
+    let remaining = ours(audit.list_recent(500).await.unwrap());
     assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].detail, "recent");
+    assert_eq!(remaining[0].detail, format!("recent-{tag}"));
 }
 
 #[tokio::test]
