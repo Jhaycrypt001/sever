@@ -54,6 +54,13 @@ test('capture the console with a live mainnet scan', async ({ page }) => {
   await expect(findings.first()).toHaveAttribute('data-tier', 'dangerous')
   await expect(page.getByTestId('coverage-notice')).toBeVisible()
 
+  // Refuse to save fake-provider output. The deterministic providers also
+  // produce a dangerous first finding, so every assertion above passes
+  // against them — which is exactly how a run of the main suite once
+  // overwrote this file with invented data. `Conduit` is the real spender on
+  // this wallet; the fakes have never heard of it.
+  await expect(findings.first()).toContainText('Conduit')
+
   // Let the reveal animations settle so nothing is caught mid-fade.
   await page.waitForTimeout(1500)
 

@@ -9,6 +9,12 @@ import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './e2e',
+  // `capture-console.spec.ts` is a build tool, not a test: it needs the LIVE
+  // providers this suite refuses, and it writes a file into `public/`. Left
+  // unexcluded it joined the suite, spent minutes waiting on a live scan that
+  // was never coming, and — worse — silently overwrote the hero screenshot
+  // with fake-provider output. It has its own config.
+  testIgnore: /capture-console\.spec\.ts/,
   // Fails fast with the fix in the message when the stack is booted in the
   // live/demo configuration, instead of producing a dozen assertion failures
   // that read like a regression (see e2e/global-setup.ts).
