@@ -9,6 +9,10 @@ import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './e2e',
+  // Fails fast with the fix in the message when the stack is booted in the
+  // live/demo configuration, instead of producing a dozen assertion failures
+  // that read like a regression (see e2e/global-setup.ts).
+  globalSetup: './e2e/global-setup.ts',
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,
