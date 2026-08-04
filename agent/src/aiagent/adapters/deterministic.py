@@ -37,7 +37,16 @@ def _behaviours(approval: RawApproval) -> tuple[str, ...]:
 
 def explain(approval: RawApproval, tier: RiskTier) -> str:
     """A factual sentence built from the signals that produced the tier. Says
-    only what the data supports — no speculation a model might otherwise add."""
+    only what the data supports — no speculation a model might otherwise add.
+
+    It describes the **risk**, never the action (ADR-066). Assessment happens
+    before anything is executed and the same port serves both modes, so an
+    explanation cannot know whether a revocation will follow: the DANGEROUS
+    line used to end "Revoking automatically." and was rendered verbatim in
+    report-only runs, directly under a banner reading *nothing was revoked*.
+    What actually happened is the revocation status' job to report, and it is
+    shown beside this sentence.
+    """
     spender = approval.spender_name or approval.spender_address
     unlimited = approval.approved_amount.strip().lower() == "unlimited"
     # Self-contained so the sentences below never repeat the token symbol.
@@ -52,7 +61,8 @@ def explain(approval: RawApproval, tier: RiskTier) -> str:
         flagged = f" Reported behaviour: {', '.join(behaviours)}." if behaviours else ""
         return (
             f"{spender} is flagged as malicious by threat intelligence and holds "
-            f"{allowance}.{flagged} Revoking automatically."
+            f"{allowance}.{flagged} It can move those tokens at any time without "
+            f"asking you again."
         )
     if tier is RiskTier.WATCH:
         if flag_state(approval.raw.get("trust_list")) is True and behaviours:

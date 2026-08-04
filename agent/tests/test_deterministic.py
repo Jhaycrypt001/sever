@@ -2,7 +2,11 @@
 they must classify from the same signals as the LLM path and must never
 fabricate an outcome. The tests assert exactly that boundary."""
 
-from aiagent.adapters.deterministic import DeterministicAgentPolicy, DeterministicThreatIntel
+from aiagent.adapters.deterministic import (
+    DeterministicAgentPolicy,
+    DeterministicThreatIntel,
+    explain,
+)
 from aiagent.domain.models import AgentStep, AgentStepKind, FinishAction, RawApproval, RiskTier
 from aiagent.domain.usage import UsageMeter
 
@@ -112,3 +116,51 @@ def test_policy_never_asks_a_clarification() -> None:
         assert not isinstance(action, type(None))
         assert action.__class__.__name__ != "AskAction"
         steps.append(AgentStep(seq=len(steps) + 1, kind=AgentStepKind.SCAN, detail="1", reason="r"))
+
+
+# ---------------------------------------------------------------- wording (ADR-066)
+
+
+def test_an_explanation_never_claims_an_action_was_or_will_be_taken() -> None:
+    """The explanation describes risk; the revocation status reports action.
+
+    Assessment runs before anything is executed, and the same port serves
+    report-only and auto-revoke runs — so an explanation cannot know what will
+    follow. The DANGEROUS line used to end "Revoking automatically." and was
+    rendered verbatim in report-only runs, directly beneath a banner reading
+    *nothing was revoked*. Caught on a live mainnet scan, not in a test.
+    """
+    for tier in (RiskTier.DANGEROUS, RiskTier.WATCH, RiskTier.SAFE):
+        approval = RawApproval(
+            chain_id="1",
+            token_address="0xtoken",
+            token_symbol="WETH",
+            spender_address="0xbad",
+            approved_amount="Unlimited",
+            raw={"malicious_address": True, "malicious_behavior": ["honeypot_related_address"]},
+        )
+        sentence = explain(approval, tier).lower()
+        assert "revoking automatically" not in sentence
+        assert "has been revoked" not in sentence
+        assert "we revoked" not in sentence
+
+
+def test_a_dangerous_explanation_still_says_why_it_is_dangerous() -> None:
+    # Dropping the action claim must not drop the substance: the reported
+    # behaviour and the unlimited allowance are the whole argument.
+    approval = RawApproval(
+        chain_id="1",
+        token_address="0xtoken",
+        token_symbol="WETH",
+        spender_address="0xbad",
+        spender_name="Conduit",
+        approved_amount="Unlimited",
+        raw={"malicious_address": True, "malicious_behavior": ["honeypot_related_address"]},
+    )
+
+    sentence = explain(approval, RiskTier.DANGEROUS)
+
+    assert "Conduit" in sentence
+    assert "unlimited allowance" in sentence
+    assert "honeypot_related_address" in sentence
+    assert "without asking you again" in sentence

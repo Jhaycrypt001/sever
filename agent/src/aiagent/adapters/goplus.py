@@ -18,6 +18,8 @@ dangerous: approving a scam token still burns gas/exposes the wallet to the
 spender, and a malicious spender is dangerous regardless of the token.
 """
 
+import logging
+import time
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,7 +28,13 @@ import httpx
 from aiagent.domain.models import RawApproval, flag_state
 from aiagent.domain.usage import UsageMeter
 
+logger = logging.getLogger(__name__)
+
 _BASE_URL = "https://api.gopluslabs.io/api/v2/token_approval_security"
+
+#: "partial data obtained" — GoPlus is still indexing the address. Transient
+#: (ADR-066), unlike 2018 (unknown chain) or 2029 (chain not served here).
+_CODE_PARTIAL = 2
 
 
 def _spender_info(approval: dict[str, Any]) -> dict[str, Any]:
@@ -91,22 +99,49 @@ class GoPlusApprovalSource:
         client: httpx.Client | None = None,
         api_key: str = "",
         timeout: float = 15.0,
+        partial_retries: int = 3,
+        partial_retry_delay: float = 1.5,
     ) -> None:
         self._meter = meter
         self._client = client or httpx.Client(timeout=timeout)
         self._api_key = api_key
+        # Retries for `code 2` only (ADR-066). Linear backoff: indexing a cold
+        # address takes seconds, not minutes, and the worker holds a Celery
+        # slot while it waits.
+        self._partial_retries = partial_retries
+        self._partial_retry_delay = partial_retry_delay
 
     def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
         if self._meter is not None:
             self._meter.record_search()
         headers = {"Authorization": self._api_key} if self._api_key else {}
-        response = self._client.get(
-            f"{_BASE_URL}/{chain_id}",
-            params={"addresses": wallet_address},
-            headers=headers,
-        )
-        response.raise_for_status()
-        payload = response.json()
+
+        payload: dict[str, Any] = {}
+        for attempt in range(self._partial_retries + 1):
+            response = self._client.get(
+                f"{_BASE_URL}/{chain_id}",
+                params={"addresses": wallet_address},
+                headers=headers,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("code") != _CODE_PARTIAL:
+                break
+            # ADR-066: `code 2` means GoPlus is still indexing this address and
+            # what it has is incomplete. It clears on its own — confirmed live:
+            # the first call for a cold address returns 2, a follow-up seconds
+            # later returns 1 with the full set. Treating it as a hard error
+            # threw away a whole chain on the *first* scan of any wallet, which
+            # is the scan every new user runs.
+            if attempt < self._partial_retries:
+                logger.info(
+                    "GoPlus still indexing chain %s, retrying (%d/%d)",
+                    chain_id,
+                    attempt + 1,
+                    self._partial_retries,
+                )
+                time.sleep(self._partial_retry_delay * (attempt + 1))
+
         if payload.get("code") != 1:
             # `.get(key, default)` returns None when the key exists *and* is
             # null, which GoPlus does on some error codes — that produced the
@@ -114,6 +149,9 @@ class GoPlusApprovalSource:
             # and the code is carried too: it is the only part an operator can
             # look up in their docs.
             message = payload.get("message") or "no message"
+            # Partial data is never merged in as if it were the whole picture:
+            # an incomplete approval list rendered as a finished scan is a
+            # coverage lie (ADR-059/064). The chain is reported unscanned.
             raise RuntimeError(f"GoPlus error (code {payload.get('code')}): {message}")
         tokens = payload.get("result") or []
         approvals: list[RawApproval] = []

@@ -2455,6 +2455,53 @@ first thing a stranger does.
 
 ---
 
+### ADR-066 — What the live provider actually answers (decided 2026-08-04, extends ADR-058/064)
+
+**Context**: the first scan of a wallet nobody had scanned before, on live
+mainnet. Three things surfaced that no unit test could have predicted, because
+they are facts about GoPlus's behaviour rather than about our code.
+
+**Decision**:
+
+1. **`code 2` ("partial data obtained") is transient, and is retried.**
+   Confirmed live: the first request for an address GoPlus has not indexed
+   returns `code 2`; a follow-up seconds later returns `code 1` with the full
+   set. The adapter treated any non-1 code as a hard error, so an entire chain
+   was discarded — on the *first* scan of any wallet, which is the scan every
+   new user runs, and the one a demo runs. Now retried (3 attempts, linear
+   backoff); other codes are not retried, because 2018/2029 are settled
+   answers about the chain and retrying only slows every scan down.
+2. **Partial data is never merged in as if complete.** If `code 2` persists,
+   the chain is reported unscanned (ADR-064 marks it `degraded`) rather than
+   delivering a half-built approval list as a finished sweep. An incomplete
+   list rendered as a complete one is a coverage lie in the ADR-059 family.
+3. **Arbitrum (42161) and Polygon (137) are dropped from the default chains.**
+   The endpoint answers `code 2029` with a null message for both, on every
+   attempt. They were in `.env.example`'s suggested list, so the documented
+   default would have shown two permanently unreachable chains on every scan.
+4. **An explanation describes the risk, never the action.** The DANGEROUS
+   sentence ended `"Revoking automatically."` — written by the threat-intel
+   port, which runs *before* anything is executed and is shared by both modes.
+   In a report-only run it was rendered verbatim underneath the banner saying
+   *nothing was revoked*: two contradictory claims on one screen, the more
+   prominent one false. The sentence now ends with what the allowance means
+   (*"It can move those tokens at any time without asking you again"*), and
+   what happened is left to the revocation status beside it, which is the
+   field that actually knows.
+
+**Consequences**: point 4 is the one to remember. ADR-059 put the
+revoked/simulated distinction in the status field, and that was enforced — but
+free-text written by a different component, at a different time, slipped a
+second claim about the same fact onto the same row. Any prose that asserts
+what the system *did* has to come from the component that did it.
+
+**How these were found**: by scanning a real wallet with real approvals on
+mainnet, not by testing. The wallet used for every earlier live run was the
+operator's own and had zero approvals, so the DANGEROUS path had never once
+been rendered from live data.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)
