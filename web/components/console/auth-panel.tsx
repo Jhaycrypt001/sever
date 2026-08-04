@@ -268,7 +268,7 @@ export function AuthPanel({
               <path d="M18.6 19 20.2 17.4a3.4 3.4 0 0 0-4.8-4.8l-1.6 1.6" />
             </svg>
             <span className="display text-lg leading-none">
-              Approval Firewall
+              Sever
             </span>
           </Link>
 

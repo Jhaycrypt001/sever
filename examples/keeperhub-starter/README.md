@@ -115,5 +115,5 @@ if kh.wallet_address() != scanned_wallet.lower():
 | `revoke_example.py` | End to end: read wallet → simulate → execute → poll → verify on-chain. |
 | `test_keeperhub.py` | `pytest -q` (needs `respx`). No network, no key. |
 
-Extracted from [Approval Firewall](../../README.md), where the same adapter
+Extracted from [Sever](../../README.md), where the same adapter
 runs unattended against live mainnet.

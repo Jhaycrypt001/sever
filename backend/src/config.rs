@@ -67,7 +67,7 @@ pub struct AppConfig {
     /// Resend API key (ADR-062). None selects the development mailer, which
     /// logs the code instead of sending it.
     pub resend_api_key: Option<String>,
-    /// The verified From address, e.g. `Approval Firewall <no-reply@x.dev>`.
+    /// The verified From address, e.g. `Sever <no-reply@x.dev>`.
     pub email_from: String,
     /// Lifetime of a verification code.
     pub email_verification_ttl_minutes: i64,
@@ -173,7 +173,7 @@ impl AppConfig {
             security_event_retention_days: i64::from(get_u32("SECURITY_EVENT_RETENTION_DAYS", 90)),
             resend_api_key,
             email_from: get("EMAIL_FROM")
-                .unwrap_or_else(|| "Approval Firewall <onboarding@resend.dev>".into()),
+                .unwrap_or_else(|| "Sever <onboarding@resend.dev>".into()),
             email_verification_ttl_minutes: i64::from(get_u32(
                 "EMAIL_VERIFICATION_TTL_MINUTES",
                 10,
@@ -364,7 +364,7 @@ mod tests {
             ("DATABASE_URL", "postgres://x"),
             ("AGENT_API_URL", "http://agent:8001"),
             ("RESEND_API_KEY", "re_live_key"),
-            ("EMAIL_FROM", "Approval Firewall <no-reply@example.dev>"),
+            ("EMAIL_FROM", "Sever <no-reply@example.dev>"),
         ]))
         .unwrap();
         assert!(config.warnings.is_empty());

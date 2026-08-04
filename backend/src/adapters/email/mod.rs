@@ -22,7 +22,7 @@ use crate::domain::ports::{EmailSender, PortError};
 use crate::domain::CodePurpose;
 
 /// Product name as it appears in the From header and the message body.
-const PRODUCT: &str = "Approval Firewall";
+const PRODUCT: &str = "Sever";
 
 /// What the code is called, and what to say to someone who did not ask for it.
 ///
@@ -84,7 +84,7 @@ fn html_body(code: &str, ttl_minutes: i64, purpose: CodePurpose) -> String {
 pub struct ResendEmailSender {
     client: reqwest::Client,
     api_key: String,
-    /// The verified sender, e.g. `Approval Firewall <no-reply@example.com>`.
+    /// The verified sender, e.g. `Sever <no-reply@example.com>`.
     from: String,
 }
 

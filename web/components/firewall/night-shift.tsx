@@ -94,7 +94,7 @@ function PhoneMock({ step }: { step: number }) {
                 </svg>
               </span>
               <span className="text-[11px] font-medium text-white/80">
-                Approval Firewall
+                Sever
               </span>
               <motion.span
                 key={step >= 1 ? 'flagged' : 'scanning'}

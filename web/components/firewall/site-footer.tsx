@@ -56,8 +56,8 @@ export function SiteFooter() {
         />
 
         <FoldingWord
-          word="FIREWALL."
-          label="Approval Firewall"
+          word="SEVER."
+          label="Sever"
           className="display mt-12 flex w-full justify-between text-foreground"
         />
 
@@ -116,7 +116,7 @@ export function SiteFooter() {
         </div>
 
         <div className="mx-auto mt-10 flex max-w-3xl flex-col gap-4 border-t border-border/60 pt-8 sm:flex-row sm:items-center">
-          <Label className="flex-1">© 2026 Approval Firewall</Label>
+          <Label className="flex-1">© 2026 Sever</Label>
           <Label className="flex-1 text-muted-foreground sm:text-center">
             Built for the KeeperHub hackathon
           </Label>

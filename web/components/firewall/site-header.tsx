@@ -48,7 +48,7 @@ function Wordmark() {
   return (
     <a
       href="/"
-      aria-label="Approval Firewall, home"
+      aria-label="Sever, home"
       // Allowed to shrink: at 320px the wordmark plus the menu button did not
       // fit, and an unshrinkable wordmark pushed the whole page sideways.
       className="flex min-w-0 items-center gap-2 sm:gap-3"
@@ -68,7 +68,7 @@ function Wordmark() {
         <path d="M18.6 19 20.2 17.4a3.4 3.4 0 0 0-4.8-4.8l-1.6 1.6" />
       </svg>
       <span className="display truncate whitespace-nowrap text-[1.125rem] leading-none text-foreground sm:text-[1.375rem] md:text-[1.6875rem]">
-        Approval Firewall
+        Sever
       </span>
     </a>
   )

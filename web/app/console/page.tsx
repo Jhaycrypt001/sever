@@ -2,7 +2,7 @@ import type { Metadata } from 'next'
 import { ConsoleApp } from '@/components/console/console-app'
 
 export const metadata: Metadata = {
-  title: 'Console · Approval Firewall',
+  title: 'Console · Sever',
   description:
     'Scan a wallet for outstanding token approvals and watch the dangerous ones get revoked onchain.',
 }

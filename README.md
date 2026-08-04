@@ -1,4 +1,4 @@
-# Approval Firewall
+# Sever
 
 **Paste a wallet address. It finds every token approval that address has ever
 granted, works out which ones can drain it, and revokes those onchain — no
@@ -8,7 +8,7 @@ signature, no seed phrase, no gas from you.**
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](agent/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)](web/)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
-[![ADRs](https://img.shields.io/badge/ADRs-67-8A2BE2)](docs/ARCHITECTURE.md)
+[![ADRs](https://img.shields.io/badge/ADRs-68-8A2BE2)](docs/ARCHITECTURE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## In 30 seconds
@@ -37,11 +37,6 @@ from you but the address.
 
 **Try it.** `docker compose --profile full up -d --build`, then
 <http://localhost:8080>. Full setup in [docs/COMMANDS.md](docs/COMMANDS.md).
-
-Approval Firewall scans a wallet's outstanding ERC-20 approvals, classifies
-every spender, and **auto-revokes the dangerous ones as real onchain
-transactions**. KeeperHub sponsors the gas, so the protected wallet needs no
-funding and never signs anything.
 
 ## Proof it executes
 

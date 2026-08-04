@@ -22,7 +22,7 @@ export function Hero() {
 
         <Reveal delay={0.35}>
           <p className="mt-8 max-w-[46ch] text-pretty text-base leading-relaxed text-muted-foreground md:text-lg">
-            Approval Firewall finds the malicious token approvals sitting in
+            Sever finds the malicious token approvals sitting in
             your wallet and revokes them onchain through KeeperHub, without
             waiting for you to notice.
           </p>

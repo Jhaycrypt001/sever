@@ -15,9 +15,9 @@ import {
 } from '@/lib/proof'
 
 export const metadata: Metadata = {
-  title: 'Docs · Approval Firewall',
+  title: 'Docs · Sever',
   description:
-    'How Approval Firewall decides what to revoke, what it covers, how to run it, and the limits it will tell you about up front.',
+    'How Sever decides what to revoke, what it covers, how to run it, and the limits it will tell you about up front.',
 }
 
 /**
@@ -115,7 +115,7 @@ export default function DocsPage() {
                   you trusted.
                 </P>
                 <P>
-                  Approval Firewall reads every outstanding ERC-20 approval for
+                  Sever reads every outstanding ERC-20 approval for
                   an address, tiers each spender, and revokes the dangerous ones
                   as real onchain transactions. Reading is public and needs
                   nothing from you but the address — no wallet connection, no

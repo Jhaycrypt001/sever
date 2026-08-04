@@ -2552,6 +2552,39 @@ extension point and needs no change to the port.
 
 ---
 
+### ADR-068 — The product is called Sever (decided 2026-08-04)
+
+**Context**: "Approval Firewall" describes the category, not the product. It is
+the kind of name three teams in the same hackathon could arrive at
+independently, and it competes directly with the literal names already in this
+space — Revoke.cash, Wallet Guard, Blockaid. A descriptive name cannot be
+owned, and this one had already started to strain: the console is not a
+firewall, it does not sit inline, and nothing is filtered.
+
+**Decision**: the product is **Sever**.
+
+1. **It names the action, not the category.** The one thing this software does
+   that a scanner does not is cut a live permission. `approve(spender, 0)` is a
+   severance.
+2. **The mark already existed.** The logo has been a shield over a severed link
+   since the first commit; the name now matches the drawing rather than
+   arguing with it.
+3. **Renamed: user-visible strings, package names, e-mail templates, the
+   wordmark, metadata titles. Not renamed: the ADRs above.** Those record what
+   was decided and when, under the name in use at the time. Rewriting them
+   would be exactly the history-editing this document forbids, and the rename
+   is itself a decision that belongs in the log rather than hidden by it.
+4. **`web/components/firewall/` keeps its name for now.** It is an internal
+   path, and renaming it churns every import in the brick for no behavioural
+   gain. Worth doing in a quiet moment, not on the way to a deadline.
+
+**Known cost**: "sever" and "server" are one keystroke apart, which matters in
+a technical audience. Accepted because the alternative candidates each traded
+that for something worse — a longer name, a grimmer one, or one that described
+the problem rather than the cure.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)

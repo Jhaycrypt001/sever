@@ -156,7 +156,7 @@ export function DashboardMock() {
           <span className="size-2 rounded-full bg-white/15" />
         </div>
         <span className="ml-2 font-mono text-[10px] text-white/40">
-          approval-firewall · console
+          sever · console
         </span>
         <span className="ml-auto rounded border border-white/10 px-1.5 py-0.5 font-mono text-[9px] text-white/40">
           ⌘K
@@ -183,7 +183,7 @@ export function DashboardMock() {
                 <path d="M18.6 19 20.2 17.4a3.4 3.4 0 0 0-4.8-4.8l-1.6 1.6" />
               </svg>
             </span>
-            <span className="text-xs font-medium text-white/80">Firewall</span>
+            <span className="text-xs font-medium text-white/80">Sever</span>
           </div>
 
           <nav className="flex flex-col gap-0.5">

@@ -39,9 +39,9 @@ export const dynamic = 'force-dynamic'
 
 export const metadata: Metadata = {
   title:
-    'Approval Firewall · the agent that revokes the approval draining your wallet',
+    'Sever · the agent that revokes the approval draining your wallet',
   description:
-    'Approval Firewall scans a wallet for malicious ERC-20 approvals and revokes the dangerous ones onchain through KeeperHub, before a drainer gets to use them.',
+    'Sever scans a wallet for malicious ERC-20 approvals and revokes the dangerous ones onchain through KeeperHub, before a drainer gets to use them.',
   icons: {
     icon: [
       {

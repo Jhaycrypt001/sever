@@ -74,7 +74,7 @@ export const TEST_COUNTS = {
   browser: 22,
 } as const
 
-export const ADR_COUNT = 67
+export const ADR_COUNT = 68
 export const MIGRATION_RANGE = '0001 – 0014'
 
 export const REPO_URL = 'https://github.com/Jhaycrypt001/ai-agent-boilerplate'
