@@ -1,5 +1,5 @@
+import Image from 'next/image'
 import { Reveal, RevealWords } from '../motion/reveal'
-import { DashboardMock } from './dashboard-mock'
 import { GhostLink, GlowPill, Shell } from './primitives'
 
 export function Hero() {
@@ -35,11 +35,16 @@ export function Hero() {
       </Shell>
 
       {/*
-        Tilted console. The figures inside it are sample data, and the page
-        says so rather than letting a stylised screenshot imply a userbase —
-        the same reason the template's borrowed customer logos and invented
-        testimonials are gone. The verifiable numbers are in the evidence
-        section, sourced from lib/proof.
+        The console, photographed rather than drawn.
+        `public/console.png` is a Playwright screenshot of this product doing
+        a live scan of a real wallet on mainnet — captured by
+        `e2e/capture-console.spec.ts`, which asserts the dangerous finding is
+        on screen before it saves.
+
+        It replaced a hand-built mock. Every figure in that mock was invented,
+        and a "sample data" caption does not really fix a fabricated panel when
+        the product it depicts exists and works. Regenerate it rather than
+        edit it.
       */}
       <div
         aria-hidden="true"
@@ -58,13 +63,20 @@ export function Hero() {
               'linear-gradient(to bottom, #000 0%, #000 55%, transparent 92%)',
           }}
         >
-          <DashboardMock />
+          <Image
+            src="/console.png"
+            alt=""
+            width={1440}
+            height={1100}
+            priority
+            className="w-[1440px] max-w-none rounded-xl border border-white/10 shadow-2xl"
+          />
         </div>
       </div>
 
       <Shell className="relative z-10 -mt-10 md:-mt-16">
         <p className="label text-center text-muted-foreground">
-          Console interface · sample data · the real transaction is below
+          A real scan of a real wallet · one dangerous approval found on Base
         </p>
       </Shell>
     </section>

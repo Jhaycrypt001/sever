@@ -2585,6 +2585,45 @@ the problem rather than the cure.
 
 ---
 
+### ADR-069 — The hero shows a photograph of the product, not a drawing of it (decided 2026-08-04)
+
+**Context**: the landing page opened with `DashboardMock` — a hand-built
+replica of the console, ~470 lines of JSX with invented KPIs, invented ledger
+rows and invented chain distributions. It carried a "sample data" caption, and
+earlier passes had already trimmed its worst claims (a "+14 this week" growth
+figure, chains the scanner cannot read).
+
+That was treating the symptom. The deeper problem is that a fabricated panel is
+strange to ship *at all* when the product it depicts exists, works, and has
+just been run against mainnet. Every invented number is a small liability, the
+caption is doing work the artefact should not need, and nobody has to trust a
+drawing when they could be looking at the thing.
+
+**Decision**: the hero is a screenshot of the real console, captured by
+`web/e2e/capture-console.spec.ts` against a live mainnet scan.
+
+1. **The capture asserts before it saves.** It waits for `completed`, requires
+   the first finding to be `data-tier="dangerous"`, and requires the coverage
+   notice to be present. A screenshot that missed the point of the page fails
+   the run rather than landing in `public/`.
+2. **It has its own Playwright config.** The suite's global setup refuses a
+   live-provider stack, correctly — the capture needs exactly that, so the
+   exception is a separate config rather than a hole in the guard.
+3. **`DashboardMock` is deleted, not disabled.** There is now no file in the
+   repository whose job is to look like output.
+4. **Regenerate rather than edit.** The image is a build artefact of a real
+   run. Touching it up by hand would quietly turn it back into a mock.
+
+**Consequences**: the hero is a raster image, so it does not adapt to theme or
+viewport the way live DOM did, and it needs re-capturing when the console
+changes shape. That is the cost of the page showing something true. The
+screenshot also happens to demonstrate three of this document's honesty rules
+at once — the coverage notice (ADR-067), *allowance still spendable* on a
+finding that was not revoked (ADR-059), and an explanation that describes risk
+rather than claiming an action (ADR-066) — which no drawing would have.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)
