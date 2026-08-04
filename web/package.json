@@ -8,9 +8,9 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "playwright test",
-    "lint": "next lint"
+    "test:e2e": "playwright test"
   },
+  "//lint": "There is no `lint` script on purpose. Next 16 removed `next lint`, and this project has no ESLint config, so the old script only ever printed an error. CI's web:lint stage runs `npm run typecheck` — the thing that actually checks this brick. A script that cannot succeed is worse than none: it invites a green tick nobody earned.",
   "//overrides": "next vendors an old postcss and an old sharp; npm's only offered fix is downgrading Next to 9.x. Both are build-time only here (images are unoptimized, so sharp never runs), but pinning the patched versions clears the advisories without touching Next.",
   "overrides": {
     "postcss": "$postcss",
