@@ -1,10 +1,19 @@
 import {
+  ADR_COUNT,
   EXECUTION_MS,
   EXECUTOR_WALLET,
   GAS_USED,
+  MAINNET_ALLOWANCE_AFTER,
+  MAINNET_SPENDER_FLAG,
+  MAINNET_SPENDER_NAME,
+  MAINNET_TOKEN,
+  MAINNET_TX_HASH,
+  MAINNET_TX_URL,
+  MIGRATION_RANGE,
   REPO_URL,
   SEPOLIA_TX_HASH,
   SEPOLIA_TX_URL,
+  TEST_COUNTS,
   truncateHash,
 } from '@/lib/proof'
 import { RevealGroup, RevealItem } from '../motion/reveal'
@@ -74,20 +83,23 @@ export function Evidence() {
           <RevealItem className="flex h-full flex-col border border-border/60 bg-card/40">
             <Receipt>
               <p className="mb-1 text-[9px] uppercase tracking-[0.2em] text-white/40">
-                Sepolia · confirmed
+                Base mainnet · confirmed
               </p>
               <Row k="Method" v="approve(spender, 0)" strong />
-              <Row k="Tx" v={truncateHash(SEPOLIA_TX_HASH, 12, 8)} strong />
+              <Row k="Tx" v={truncateHash(MAINNET_TX_HASH, 12, 8)} strong />
+              <Row k="Token" v={`${MAINNET_TOKEN} · unlimited`} />
+              <Row k="Spender" v={`${MAINNET_SPENDER_NAME} · ${MAINNET_SPENDER_FLAG}`} />
               <Row k="From" v={truncateHash(EXECUTOR_WALLET, 10, 6)} />
-              <Row k="Gas used" v={GAS_USED} />
-              <Row k="Duration" v={`${EXECUTION_MS} ms`} />
               <Row k="Sponsored" v="yes · wallet paid 0" />
+              <Row k="Allowance now" v={MAINNET_ALLOWANCE_AFTER} strong />
             </Receipt>
 
             <figure className="flex flex-1 flex-col p-6">
               <blockquote className="flex-1 text-pretty text-lg leading-snug tracking-tight text-foreground">
-                A real revocation, broadcast through KeeperHub and confirmed on
-                chain. Open it yourself; nothing here is a screenshot.
+                A real revocation on mainnet, decided by the classifier and
+                broadcast with nobody in the loop. The last row is the one that
+                matters: we read the allowance back off the chain afterwards,
+                because a status field is only our own opinion of our work.
               </blockquote>
 
               <figcaption className="mt-8 flex flex-wrap items-center gap-2 border-t border-border/60 pt-4">
@@ -97,12 +109,20 @@ export function Evidence() {
               </figcaption>
 
               <a
-                href={SEPOLIA_TX_URL}
+                href={MAINNET_TX_URL}
                 target="_blank"
                 rel="noreferrer"
                 className="label mt-4 text-foreground underline-offset-4 transition-opacity hover:opacity-60"
               >
-                View on Etherscan →
+                View on BaseScan →
+              </a>
+              <a
+                href={SEPOLIA_TX_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="label mt-2 text-muted-foreground underline-offset-4 transition-opacity hover:opacity-60"
+              >
+                Earlier proof on Sepolia ({GAS_USED} gas, {EXECUTION_MS} ms) →
               </a>
             </figure>
           </RevealItem>
@@ -166,9 +186,16 @@ export function Evidence() {
               </p>
               <Row k="Backend" v="Rust · Axum · hexagonal" strong />
               <Row k="Agent" v="Python · Celery · LangGraph" strong />
-              <Row k="Tests" v="209 python · 153 rust" />
-              <Row k="Decisions" v="60 ADRs, dated" />
-              <Row k="Migrations" v="0001 – 0012" />
+              <Row
+                k="Tests"
+                v={`${TEST_COUNTS.python} python · ${TEST_COUNTS.rust} rust`}
+              />
+              <Row
+                k="Also"
+                v={`${TEST_COUNTS.postgres} postgres · ${TEST_COUNTS.browser} browser`}
+              />
+              <Row k="Decisions" v={`${ADR_COUNT} ADRs, dated`} />
+              <Row k="Migrations" v={MIGRATION_RANGE} />
               <Row k="Fakes in prod" v="refused at boot" />
             </Receipt>
 

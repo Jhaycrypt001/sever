@@ -1,3 +1,4 @@
+import { CHAIN_COUNT } from '@/lib/proof'
 import { cn } from '@/lib/utils'
 import { Reveal, RevealGroup, RevealItem } from '../motion/reveal'
 import { Display, Label, MetaRule, Shell } from './primitives'
@@ -96,7 +97,7 @@ export function FindingsFeed() {
         <MetaRule
           dot
           left={`${FINDINGS.length} approvals · 03:14 UTC`}
-          center="1 wallet · 5 chains"
+          center={`1 wallet · ${CHAIN_COUNT} chains`}
           right={`${dangerous} auto-revoked`}
         />
 

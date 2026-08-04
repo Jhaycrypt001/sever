@@ -1,4 +1,4 @@
-import { REPO_URL, SEPOLIA_TX_URL } from '@/lib/proof'
+import { MAINNET_TX_URL, REPO_URL } from '@/lib/proof'
 import { FoldingWord } from './folding-word'
 import { GlowButton, Label, MetaRule, Shell } from './primitives'
 
@@ -14,16 +14,20 @@ const COLUMNS = [
   {
     title: 'evidence',
     links: [
-      { label: 'The transaction', href: SEPOLIA_TX_URL },
+      { label: 'The transaction', href: MAINNET_TX_URL },
       { label: 'Decision log', href: `${REPO_URL}/blob/main/docs/ARCHITECTURE.md` },
       { label: 'Source', href: REPO_URL },
     ],
   },
   {
+    // No "Terms" and no "Privacy": both linked to `#`, which promises legal
+    // documents that do not exist. A dead link where a policy should be is
+    // worse than no link — it implies someone wrote one. What we can point at
+    // truthfully is the licence and the code that handles the data.
     title: 'legal',
     links: [
-      { label: 'Terms', href: '#' },
-      { label: 'Privacy', href: '#' },
+      { label: 'Licence (MIT)', href: `${REPO_URL}/blob/main/LICENSE` },
+      { label: 'What we store', href: `${REPO_URL}/blob/main/docs/ARCHITECTURE.md` },
     ],
   },
 ]
@@ -124,10 +128,10 @@ export function SiteFooter() {
               GitHub
             </a>
             <a
-              href={SEPOLIA_TX_URL}
+              href={MAINNET_TX_URL}
               className="label text-foreground transition-opacity hover:opacity-60"
             >
-              Etherscan
+              BaseScan
             </a>
           </nav>
         </div>

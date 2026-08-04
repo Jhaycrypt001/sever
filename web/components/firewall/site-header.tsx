@@ -46,7 +46,7 @@ function AnnouncementBanner({ onClose }: { onClose: () => void }) {
 function Wordmark() {
   return (
     <a
-      href="#"
+      href="/"
       aria-label="Approval Firewall, home"
       // Allowed to shrink: at 320px the wordmark plus the menu button did not
       // fit, and an unshrinkable wordmark pushed the whole page sideways.

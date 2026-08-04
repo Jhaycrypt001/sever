@@ -12,9 +12,13 @@ const NAV = [
 const TABS = ['OVERVIEW', 'FINDINGS', 'REVOCATIONS', 'JOURNAL', 'SETTINGS']
 
 const KPIS = [
-  { label: 'WALLETS WATCHED', value: '128', delta: '+14 this week' },
-  { label: 'DANGEROUS APPROVALS', value: '37', delta: 'across 5 chains' },
-  { label: 'AUTO-REVOKED', value: '31', delta: '6 left for review' },
+  // Sample data — the caption under this mock says so. Kept deliberately
+  // modest: an invented "+14 this week" is a traction claim, and this project
+  // has no users to count. Illustrating the layout is fair; implying adoption
+  // is not.
+  { label: 'WALLETS WATCHED', value: '3', delta: 'sample data' },
+  { label: 'DANGEROUS APPROVALS', value: '4', delta: 'across 3 chains' },
+  { label: 'AUTO-REVOKED', value: '3', delta: '1 left for review' },
   { label: 'TIME TO REVOKE', value: '7.9s', delta: 'scan to confirmation' },
 ]
 
