@@ -2806,6 +2806,16 @@ the live demo in a way a self-hosted box would not be. The runbook, including
 the verification steps that distinguish "container is up" from "the path
 actually works", is `deploy/RAILWAY.md`.
 
+Verified end to end on 2026-08-05 against the deployed console: registration by
+a previously unknown address, delivery of the code by e-mail, the ADR-063 second
+factor on sign-in, and a scan reaching all three chains and classifying a live
+approval. One incidental finding is recorded here because it looks like a bug
+and is not: GoPlus answers `code 2029` on a *supported* chain when the anonymous
+tier is rate-limited, and the same request succeeds moments later. ADR-064 turns
+that into a `degraded` chain and a partial report rather than a lost run, which
+is the designed behaviour — but a deployment meant to be watched should set
+`GOPLUS_API_KEY` so the question does not arise.
+
 ---
 
 ## 4. API contracts (summary)

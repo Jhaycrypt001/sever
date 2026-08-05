@@ -6,12 +6,15 @@ Manual setup and deployment steps live in [SETUP.md](SETUP.md).
 
 ## P1 — Core reliability (before real usage)
 
-- [ ] **Hosted deployment on Railway (ADR-073)** — in progress. Everything below
-      was verified on one laptop, which for a product other people are meant to
-      use is the same as not working. Six services, only the console public;
-      runbook in [deploy/RAILWAY.md](deploy/RAILWAY.md). Blocks the passkey work
-      below, because a WebAuthn credential is bound to a hostname that does not
-      exist yet.
+- [x] **Hosted deployment on Railway (ADR-073)** — done. Everything was
+      previously verified on one laptop, which for a product other people are
+      meant to use is the same as not working. Six services, only the console
+      public; runbook in [deploy/RAILWAY.md](deploy/RAILWAY.md). Verified live
+      on 2026-08-05 end to end: a stranger can register, receive the code by
+      e-mail, sign in with it, and run a scan that reaches all three chains and
+      returns a classified approval. Two binding failures worth remembering are
+      in the runbook — the health check arrives over IPv4 whatever the private
+      network does, and `API_ORIGIN` is a *build* argument.
 - [ ] **Passkey sign-in (ADR-072)** — foundation committed (migration
       `0015_passkeys.sql`, `backend/src/domain/passkey.rs`, the
       `PasskeyRepository` port). Remaining: the `webauthn_rp` adapter, the

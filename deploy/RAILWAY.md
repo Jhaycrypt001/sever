@@ -140,6 +140,7 @@ AGENT_ORCHESTRATOR=langgraph
 KEEPERHUB_API_URL=https://app.keeperhub.com
 KEEPERHUB_API_KEY=PASTE_KEEPERHUB_API_KEY
 AGENT_SCAN_CHAIN_IDS=1,56,8453
+GOPLUS_API_KEY=PASTE_GOPLUS_API_KEY_OR_LEAVE_EMPTY
 ANTHROPIC_API_KEY=PASTE_ANTHROPIC_API_KEY_OR_LEAVE_EMPTY
 AGENT_MODEL_ID=claude-opus-4-8
 AGENT_MAX_STEPS=5
@@ -156,6 +157,13 @@ what authenticates the worker's result callback to the backend (ADR-006).
 
 `AGENT_SCAN_CHAIN_IDS` is exactly the three chains GoPlus can enumerate
 approvals on. Adding Polygon or Arbitrum produces `code 2029` per request.
+
+`code 2029` on a *supported* chain is a rate limit, not a rejection — verified
+on 2026-08-05, when Ethereum returned 2029 for one scan and full approval data
+for the next. Without `GOPLUS_API_KEY` the worker is on the anonymous tier and
+this happens under any burst; the run survives as `degraded` (ADR-064) but the
+report carries a banner saying that chain was not reached. Set `GOPLUS_API_KEY`
+before anything anyone is watching.
 
 Leaving `ANTHROPIC_API_KEY` empty is safe and cheap: risk tiers come from the
 deterministic classifier either way (ADR-060), and only the prose explanation
@@ -190,9 +198,14 @@ nothing.
 curl -sS -o /dev/null -w '%{http_code}\n' https://YOUR-DOMAIN.up.railway.app/
 
 # 2. The proxy reaches the backend through the private network.
-#    404 or 502 here means API_ORIGIN was wrong at build time - rebuild web
-#    after fixing it, because the value is baked in.
-curl -sS https://YOUR-DOMAIN.up.railway.app/api/healthz
+#    Expect 401 "invalid credentials" - that is the backend answering, which
+#    is the whole point. A 502 means API_ORIGIN was wrong at build time;
+#    rebuild web after fixing it, because the value is baked in.
+#    Do not curl /api/healthz: the health endpoint is at the backend root,
+#    so that path legitimately 404s and tells you nothing.
+curl -sS -X POST https://YOUR-DOMAIN.up.railway.app/api/auth/login \
+  -H 'content-type: application/json' \
+  -d '{"email":"nobody@example.com","password":"wrong"}'
 
 # 3. Sign up with a real address and confirm the code arrives by e-mail.
 #    A code appearing in the HTTP response instead means APP_ENV is not
