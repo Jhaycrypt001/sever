@@ -6,6 +6,18 @@ Manual setup and deployment steps live in [SETUP.md](SETUP.md).
 
 ## P1 — Core reliability (before real usage)
 
+- [ ] **Hosted deployment on Railway (ADR-073)** — in progress. Everything below
+      was verified on one laptop, which for a product other people are meant to
+      use is the same as not working. Six services, only the console public;
+      runbook in [deploy/RAILWAY.md](deploy/RAILWAY.md). Blocks the passkey work
+      below, because a WebAuthn credential is bound to a hostname that does not
+      exist yet.
+- [ ] **Passkey sign-in (ADR-072)** — foundation committed (migration
+      `0015_passkeys.sql`, `backend/src/domain/passkey.rs`, the
+      `PasskeyRepository` port). Remaining: the `webauthn_rp` adapter, the
+      Postgres implementation, four HTTP routes, and the sign-in screen. The RP
+      ID must be the final hostname — passkeys registered against a temporary
+      domain all break when it changes, with no migration but re-registration.
 - [x] **A revocation is refused for a wallet KeeperHub cannot execute as
       (ADR-065)** — done, found while switching to live mainnet. KeeperHub
       executes as the wallet behind the API key, the console accepts any scan

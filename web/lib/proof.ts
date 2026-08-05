@@ -74,7 +74,7 @@ export const TEST_COUNTS = {
   browser: 22,
 } as const
 
-export const ADR_COUNT = 71
+export const ADR_COUNT = 73
 export const MIGRATION_RANGE = '0001 – 0015'
 
 export const REPO_URL = 'https://github.com/Jhaycrypt001/sever'

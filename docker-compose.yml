@@ -127,7 +127,11 @@ services:
       # containerized worker read none of them, so it could only ever run with
       # the keyless fakes. With AGENT_PROVIDERS=live it refused to boot, which
       # is the fail-fast working, but the cause was compose, not the operator.
-      KEEPERHUB_API_URL: ${KEEPERHUB_API_URL:-https://api.keeperhub.io}
+      # The host the executor was actually verified against; it matches the
+      # default in agent/src/aiagent/config.py. The previous value here named a
+      # different host, so a deployment that relied on the compose default
+      # rather than an explicit .env would have pointed at nothing.
+      KEEPERHUB_API_URL: ${KEEPERHUB_API_URL:-https://app.keeperhub.com}
       KEEPERHUB_API_KEY: ${KEEPERHUB_API_KEY:-}
       # Safety valve (ADR-058/059): a simulated run is never reported as a
       # revocation, and production refuses to start in this mode at all.
@@ -135,7 +139,12 @@ services:
       # GoPlus works keyless at a lower rate limit (ADR-058).
       GOPLUS_API_KEY: ${GOPLUS_API_KEY:-}
       # Chains scanned when a job does not name its own scope (ADR-058).
-      AGENT_SCAN_CHAIN_IDS: ${AGENT_SCAN_CHAIN_IDS:-1,8453,42161,137}
+      # Exactly the three GoPlus can enumerate approvals on: Ethereum, BNB
+      # Chain, Base. The default used to list Polygon and Arbitrum, which the
+      # token_approval_security endpoint answers with code 2029, and omitted
+      # BNB Chain, which it serves. Classification covers far more chains than
+      # enumeration does, and this list is the enumeration one.
+      AGENT_SCAN_CHAIN_IDS: ${AGENT_SCAN_CHAIN_IDS:-1,56,8453}
       # Decision-loop budgets (ADR-030/048).
       AGENT_MAX_STEPS: ${AGENT_MAX_STEPS:-5}
       AGENT_MAX_COST_USD: ${AGENT_MAX_COST_USD:-2.0}

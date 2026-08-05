@@ -463,7 +463,28 @@ ADR-015 amendment in docs/ARCHITECTURE.md.
 
 ---
 
-## 10. CI/CD and production (VPS)
+## 10. Hosted deployment (Railway)
+
+The hosted deployment runs on Railway (ADR-073): six services in one project,
+with only the console public. The full runbook — service layout, the variable
+blocks to paste, and the checks that tell a working path from a merely green
+container — is **[deploy/RAILWAY.md](../deploy/RAILWAY.md)**.
+
+Service configuration is committed rather than left in dashboard fields:
+
+| Service | Root directory | Config file |
+|---|---|---|
+| `backend` | `/backend` | `backend/railway.json` |
+| `agent-api` | `/agent` | `agent/railway.api.json` |
+| `agent-worker` | `/agent` | `agent/railway.worker.json` |
+| `web` | `/web` | `web/railway.json` |
+
+Three things bite if forgotten, all covered in the runbook: bind to IPv6 (the
+private network has no IPv4), deploy Redis from the `redis-stack-server` image
+rather than the managed plugin (the LangGraph checkpointer needs RediSearch),
+and set `API_ORIGIN` before the first `web` build (Next bakes rewrites in).
+
+## 11. CI/CD and self-hosted production (VPS)
 
 **GitHub Actions is the primary CI** (ADR-019, `.github/workflows/`): `ci.yml`
 runs lint + tests on every PR and publishes images to GHCR on `main`;

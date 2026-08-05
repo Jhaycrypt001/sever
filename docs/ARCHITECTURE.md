@@ -2715,6 +2715,95 @@ change, and the port makes a third provider one more file.
 
 ---
 
+### ADR-072 — Passkey sign-in *(in progress)* (decided 2026-08-05, follows ADR-063)
+
+**Context**: ADR-063 mails a code on every sign-in. That is genuinely safer than
+a password alone, but it puts an inbox round trip in front of every session, and
+an inbox is the thing most often compromised. Browsers and phones already carry
+a stronger authenticator — a fingerprint reader or a face sensor bound to
+hardware — and WebAuthn exposes it without the product ever handling a
+biometric: the sensor unlocks a private key that never leaves the device.
+
+**Decision**: register passkeys from an already-authenticated session and let
+one open a session on its own afterwards. Registration is what establishes the
+second factor, so a passkey login does not also demand a mailed code; the factor
+lives in the authenticator rather than the inbox.
+
+Login uses **discoverable credentials** (resident keys). The browser names the
+account only after the user has proved possession, so the sign-in screen never
+has to ask for an e-mail address first — which is what would otherwise let a
+stranger probe whether an address has an account.
+
+The library is **`webauthn_rp`**, not the more common `webauthn-rs`. The latter
+pulls `openssl-sys`, which needs a native OpenSSL toolchain that the MSVC target
+here cannot satisfy without vcpkg and nasm; `webauthn_rp` is pure Rust and
+builds anywhere the rest of the backend does. Hand-rolling the verification was
+rejected outright — this is signature checking against attacker-controlled
+input, the last place to save a dependency.
+
+Ceremony state is held server-side in `webauthn_ceremonies`, single-use and
+expiring after five minutes (`CEREMONY_TTL_SECONDS`). A challenge the client
+could choose is not a challenge.
+
+**Status**: the foundation is committed — migration `0015_passkeys.sql`, the
+domain types in `backend/src/domain/passkey.rs`, and the `PasskeyRepository`
+port. Still to build: the adapter wrapping `webauthn_rp`, the Postgres
+implementation, the four HTTP routes, and the sign-in screen. Tracked in
+`ROADMAP.md`.
+
+**Consequences**: one decision cannot be deferred past the first deployment. A
+credential is bound to an **RP ID**, which is a domain — passkeys registered
+against a Railway subdomain stop working the moment the product moves to a
+custom domain, with no migration path other than asking every user to register
+again. The hostname must therefore be final before anyone registers a passkey,
+which is why this ADR waits on ADR-073 rather than the other way round.
+
+---
+
+### ADR-073 — Railway for the hosted deployment (decided 2026-08-05, revisits ADR-015)
+
+**Context**: ADR-015 describes deploying to a VPS with compose, Caddy and a
+registry pull. That is a good long-term answer and a poor immediate one: it
+needs a server, a domain, DNS, TLS and a deploy job configured before a single
+person can use the product. Everything in this repository was verified working
+on one laptop, which is the same as not working — a judge cannot open a laptop.
+
+**Decision**: host on Railway as six services in one project. Only the console
+is public; the API, the agent and both data stores stay on the private network.
+The console already proxies `/api/*` to the backend itself so the refresh cookie
+stays same-origin (ADR-008), and that same proxy is what lets the backend keep
+no public domain at all — the internal token is never exposed to the internet.
+
+Three properties of the platform shape the configuration, and each one is a
+silent failure if missed:
+
+- **The private network is IPv6-only.** A service bound to `0.0.0.0` is
+  invisible to its siblings while looking perfectly healthy on its own card.
+  Every bind is set to `::` or `[::]`.
+- **The managed Redis is not Redis Stack.** The LangGraph checkpointer of
+  ADR-046 calls `FT.CREATE`, a RediSearch command the plugin does not have, so
+  Redis is deployed from the `redis-stack-server` image instead. Falling back to
+  `AGENT_ORCHESTRATOR=loop` would have worked around it by discarding ADR-046.
+- **`API_ORIGIN` is consumed at build time**, because Next serialises rewrites
+  into the build output. Set only at runtime, the console builds a proxy
+  pointing at `localhost` and every API call fails after a green deploy.
+
+Service configuration lives in `railway.json` files next to each brick rather
+than in dashboard fields, so the deployment is reviewable in the repository. The
+agent image carries two of them — one per role — since the API and the worker
+differ only by start command.
+
+**Consequences**: the product becomes reachable, which unblocks ADR-072's RP ID
+and the demo. ADR-015 is not withdrawn — nothing here is Railway-specific beyond
+the hostnames, the compose file still describes the same six processes, and a
+move to a VPS remains a configuration change. The costs are real but small: six
+services exceed Railway's free credit, and the platform becomes a dependency of
+the live demo in a way a self-hosted box would not be. The runbook, including
+the verification steps that distinguish "container is up" from "the path
+actually works", is `deploy/RAILWAY.md`.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)

@@ -68,7 +68,7 @@ The boilerplate repository itself deploys nothing (ADR-019). This checklist is
 the deployment story for **your fork** or private instance. Automation options:
 wire your own deploy job (the GitLab CI mirror contains a reference
 `deploy:vps` job to copy), or deploy by hand with the commands in
-docs/COMMANDS.md §10.
+docs/COMMANDS.md §11.
 
 - [ ] Rent a VPS (2 vCPU / 4 GB RAM is comfortable for the full stack).
 - [ ] Install Docker Engine + the compose plugin (https://docs.docker.com/engine/install/).
@@ -105,12 +105,12 @@ docs/COMMANDS.md §10.
   docker login ghcr.io -u Jhaycrypt001 -p <PAT-read-packages>
   ```
 - [ ] First deployment (by hand, or via your fork's deploy job — see
-      docs/COMMANDS.md §10 for the exact commands), then check:
+      docs/COMMANDS.md §11 for the exact commands), then check:
   ```sh
   curl https://<domain>/healthz        # via Caddy -> backend
   docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile full ps
   ```
-- [ ] Set up the daily PostgreSQL backup cron (see docs/COMMANDS.md §10), e.g.:
+- [ ] Set up the daily PostgreSQL backup cron (see docs/COMMANDS.md §11), e.g.:
   ```
   0 3 * * * cd /opt/aiagent && docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml exec -T postgres pg_dump -U app aiagent | gzip > /opt/aiagent/backups/aiagent_$(date +\%F).sql.gz
   ```
