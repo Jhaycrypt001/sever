@@ -6,8 +6,8 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::{
-    AgentStep, ApprovalFinding, CodePurpose, EmailVerification, JobUsage, RecurringSearch,
-    RefreshToken, ScanJob, SecurityEvent, User,
+    AgentStep, ApprovalFinding, CodePurpose, EmailVerification, JobUsage, PasskeyCredential,
+    RecurringSearch, RefreshToken, ScanJob, SecurityEvent, User, WebauthnCeremony,
 };
 
 /// Infrastructure failure surfaced through a port (DB down, network error...).
@@ -65,6 +65,42 @@ pub trait EmailVerificationRepository: Send + Sync {
     async fn mark_consumed(&self, id: Uuid, at: DateTime<Utc>) -> Result<(), PortError>;
     /// Purges codes that expired before `cutoff` (called by the reaper).
     async fn delete_expired(&self, now: DateTime<Utc>) -> Result<u64, PortError>;
+}
+
+/// Registered passkeys and in-flight WebAuthn ceremonies (ADR-072).
+///
+/// One port rather than two: a ceremony exists only to produce or consume a
+/// credential, and every use case here touches both.
+#[async_trait]
+pub trait PasskeyRepository: Send + Sync {
+    async fn insert_credential(&self, credential: &PasskeyCredential) -> Result<(), PortError>;
+    async fn credentials_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<PasskeyCredential>, PortError>;
+    /// Looks a credential up by the ID the browser presented, across all
+    /// accounts — this is what turns a discoverable sign-in into a user.
+    async fn find_by_credential_id(
+        &self,
+        credential_id: &str,
+    ) -> Result<Option<PasskeyCredential>, PortError>;
+    /// Persists the library's updated credential (the signature counter moves
+    /// on every use, and a counter that goes backwards is how a cloned
+    /// authenticator is detected).
+    async fn update_credential(
+        &self,
+        id: Uuid,
+        credential: &serde_json::Value,
+        last_used_at: DateTime<Utc>,
+    ) -> Result<(), PortError>;
+    async fn delete_credential(&self, id: Uuid, user_id: Uuid) -> Result<bool, PortError>;
+
+    async fn insert_ceremony(&self, ceremony: &WebauthnCeremony) -> Result<(), PortError>;
+    /// Fetches and deletes in one step. A challenge is single-use: leaving it
+    /// readable after the answer arrives is what makes a replay possible.
+    async fn take_ceremony(&self, id: Uuid) -> Result<Option<WebauthnCeremony>, PortError>;
+    /// Purges ceremonies abandoned before `cutoff` (called by the reaper).
+    async fn delete_expired_ceremonies(&self, now: DateTime<Utc>) -> Result<u64, PortError>;
 }
 
 /// Delivers transactional email (ADR-062).

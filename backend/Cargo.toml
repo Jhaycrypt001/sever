@@ -34,6 +34,7 @@ hmac = "0.13.0"
 # network fetch, self-hosted at /api/docs.
 utoipa = { version = "5", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
+webauthn_rp = { version = "0.3.0", features = ["serde_relaxed", "serializable_server_state"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -1,6 +1,7 @@
 pub mod approval_finding;
 pub mod email_verification;
 pub mod job;
+pub mod passkey;
 pub mod ports;
 pub mod recurring;
 pub mod refresh_token;
@@ -10,6 +11,7 @@ pub mod user;
 pub use approval_finding::{sort_by_risk, ApprovalFinding, RevocationStatus, RiskTier};
 pub use email_verification::{CodePurpose, EmailVerification};
 pub use job::{AgentStep, JobMode, JobStatus, JobUsage, ScanJob};
+pub use passkey::{CeremonyPurpose, PasskeyCredential, WebauthnCeremony};
 pub use recurring::RecurringSearch;
 pub use refresh_token::RefreshToken;
 pub use security_event::{SecurityEvent, SecurityEventKind};
