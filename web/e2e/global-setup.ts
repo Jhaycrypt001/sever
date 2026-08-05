@@ -30,6 +30,7 @@ function bail(problem: string, fix: string): never {
       '',
       '    AGENT_PROVIDERS=fake RATE_LIMIT_AUTH_PER_MINUTE=1000 \\',
       '    LOGIN_MAX_ATTEMPTS_PER_MINUTE=1000 DAILY_SEARCH_QUOTA=1000 \\',
+      '    APP_ENV=development RESEND_API_KEY= \\',
       '    docker compose --profile full up -d --build',
       '',
       '  This shadows .env without editing it, so a live demo config survives.',

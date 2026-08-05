@@ -286,15 +286,23 @@ have nothing to do with the code:
 - `AGENT_PROVIDERS=live` — a freshly generated test wallet has no real
   approvals, so every findings assertion fails;
 - `RATE_LIMIT_AUTH_PER_MINUTE=10` (the production-ish default) — the suite
-  trips the per-IP auth limiter partway through and the rest 429.
+  trips the per-IP auth limiter partway through and the rest 429;
+- `APP_ENV=production` or a configured `RESEND_API_KEY` — the verification code
+  is then mailed instead of returned by the API (ADR-062), and the browser has
+  no way to read it, so every registration stalls on the code screen.
 
 Always boot with the overrides below, which shadow `.env` without editing it:
 
 ```sh
 AGENT_PROVIDERS=fake RATE_LIMIT_AUTH_PER_MINUTE=1000 \
 LOGIN_MAX_ATTEMPTS_PER_MINUTE=1000 DAILY_SEARCH_QUOTA=1000 \
+APP_ENV=development RESEND_API_KEY= \
 docker compose --profile full up -d --build
 ```
+
+The last two matter once the deployment is real: `.env` then carries
+`APP_ENV=production` and a live mail key, and without shadowing them the suite
+runs against a stack that mails codes to an inbox it cannot open.
 
 A red suite straight after a live demo is almost always this, not a regression
 — check `docker compose exec agent-worker sh -c 'echo $AGENT_PROVIDERS'` first.
