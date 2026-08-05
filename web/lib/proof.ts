@@ -75,9 +75,9 @@ export const TEST_COUNTS = {
 } as const
 
 export const ADR_COUNT = 71
-export const MIGRATION_RANGE = '0001 – 0014'
+export const MIGRATION_RANGE = '0001 – 0015'
 
-export const REPO_URL = 'https://github.com/Jhaycrypt001/ai-agent-boilerplate'
+export const REPO_URL = 'https://github.com/Jhaycrypt001/sever'
 
 /** Short form for display, e.g. 0xa3e2b0…822c28 */
 export function truncateHash(hash: string, lead = 8, tail = 6): string {

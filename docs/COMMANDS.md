@@ -475,7 +475,7 @@ GitLab-hosted forks and includes a reference `deploy:vps` job.
 On the VPS (`/opt/aiagent/`, by hand or from your fork's deploy job):
 
 ```sh
-export CI_REGISTRY_IMAGE=ghcr.io/christopheduc-me/ai-agent-boilerplate IMAGE_TAG=<short_sha>
+export CI_REGISTRY_IMAGE=ghcr.io/jhaycrypt001/sever IMAGE_TAG=<short_sha>
 
 docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile full pull
 docker compose -f docker-compose.yml -f deploy/docker-compose.prod.yml --profile full up -d

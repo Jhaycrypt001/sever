@@ -560,7 +560,7 @@ must be validated automatically, and `.gitlab-ci.yml` does not run on GitHub.
      image builds. PRs build **without pushing** (Dockerfile validation, no
      secrets involved — safe for fork PRs since the test suite calls no paid
      service, ADR-012); pushes to `main`/tags publish to **GHCR**
-     (`ghcr.io/christopheduc-me/ai-agent-boilerplate/{backend,agent,frontend}`,
+     (`ghcr.io/jhaycrypt001/sever/{backend,agent,frontend}`,
      short-sha + `latest` tags — same scheme as ADR-015).
    - `security.yml` — weekly cron (`0 6 * * 1`) + on-demand: gitleaks (full
      history), cargo/pip/npm audits. No manual schedule to create, unlike GitLab.

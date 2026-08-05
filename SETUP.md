@@ -52,7 +52,7 @@ docs/COMMANDS.md.
       automatically; trigger it once manually (Actions → Security audits →
       Run workflow) to validate.
 - [ ] GHCR images are published under
-      `ghcr.io/christopheduc-me/ai-agent-boilerplate/*`: after the first `main`
+      `ghcr.io/jhaycrypt001/sever/*`: after the first `main`
       push, set the packages' visibility to **public** (Package settings) so
       anyone can pull and try the stack without auth.
 
@@ -102,7 +102,7 @@ docs/COMMANDS.md §10.
       nothing to do. If private, create a fine-grained PAT with `read:packages`
       and log in:
   ```sh
-  docker login ghcr.io -u christopheduc-me -p <PAT-read-packages>
+  docker login ghcr.io -u Jhaycrypt001 -p <PAT-read-packages>
   ```
 - [ ] First deployment (by hand, or via your fork's deploy job — see
       docs/COMMANDS.md §10 for the exact commands), then check:

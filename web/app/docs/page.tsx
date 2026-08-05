@@ -287,7 +287,7 @@ eth_call allowance(wallet, spender) -> 0x0…0`}</Code>
                   nothing calls a paid service.
                 </P>
                 <Code>{`git clone ${REPO_URL}.git
-cd ai-agent-boilerplate
+cd sever
 cp .env.example .env
 
 AGENT_PROVIDERS=fake docker compose --profile full up -d --build
