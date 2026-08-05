@@ -201,11 +201,15 @@ docs/                           # ARCHITECTURE.md (71 ADRs), COMMANDS.md, diagra
 - [contracts/README.md](contracts/README.md) — the cross-language contracts.
 - [ROADMAP.md](ROADMAP.md) — what is next.
 
-## License
+## License and attribution
 
 MIT — see [LICENSE](LICENSE).
 
----
+Sever is derived from the hexagonal AI-agent boilerplate by
+**Christophe DUC**, used under the MIT licence. That template supplied the
+Rust and Axum API skeleton, the Python and Celery worker, the port-and-adapter
+split, the container and CI setup, and ADR-001 through ADR-057.
 
-Built on a hexagonal AI-agent boilerplate; the pivot to onchain approval
-scanning is recorded in ADR-058 onward.
+Everything from **ADR-058 onward** is this project's own work: the approval
+scanner, the deterministic risk classifier, the KeeperHub execution path, the
+console, and the authentication described in ADR-062 onward.
