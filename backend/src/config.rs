@@ -29,11 +29,17 @@ pub const REQUIRED_IN_PRODUCTION: &[&str] = &[
     "INTERNAL_API_TOKEN",
     "DATABASE_URL",
     "AGENT_API_URL",
-    // ADR-062: with no mail provider, registration creates accounts that can
-    // never be verified and therefore never signed into. Fail at boot instead.
-    "RESEND_API_KEY",
     "EMAIL_FROM",
 ];
+
+/// Mail providers, in the order they are preferred when several are configured.
+///
+/// ADR-062 requires *a* provider in production — with none, registration
+/// creates accounts that can never be verified and therefore never signed into,
+/// so the boot fails instead. ADR-071 makes it "any one of these" rather than
+/// Resend specifically: naming one provider in the check meant adding a second
+/// could not satisfy it.
+pub const EMAIL_PROVIDER_KEYS: &[&str] = &["BREVO_API_KEY", "RESEND_API_KEY"];
 
 use crate::adapters::http::RateLimitConfig;
 
@@ -64,9 +70,13 @@ pub struct AppConfig {
     /// are purged by the background loop. Kept generous so an incident stays
     /// investigable; 0 disables the purge (keep forever).
     pub security_event_retention_days: i64,
-    /// Resend API key (ADR-062). None selects the development mailer, which
-    /// logs the code instead of sending it.
+    /// Resend API key (ADR-062). With no provider at all, the development
+    /// mailer is selected and logs the code instead of sending it.
     pub resend_api_key: Option<String>,
+    /// Brevo API key (ADR-071). Preferred over Resend when both are set,
+    /// because it can deliver to addresses other than the account owner's
+    /// without a verified domain.
+    pub brevo_api_key: Option<String>,
     /// The verified From address, e.g. `Sever <no-reply@x.dev>`.
     pub email_from: String,
     /// Lifetime of a verification code.
@@ -97,7 +107,12 @@ impl AppConfig {
     {
         let is_production = lookup("APP_ENV").as_deref() == Some("production");
         if is_production {
-            let missing = missing_required(REQUIRED_IN_PRODUCTION, &lookup);
+            let mut missing = missing_required(REQUIRED_IN_PRODUCTION, &lookup);
+            // Any one provider satisfies this, so it cannot be expressed as a
+            // list of individually-required names.
+            if missing_required(EMAIL_PROVIDER_KEYS, &lookup).len() == EMAIL_PROVIDER_KEYS.len() {
+                missing.push(EMAIL_PROVIDER_KEYS.join(" or "));
+            }
             if !missing.is_empty() {
                 return Err(missing);
             }
@@ -127,11 +142,13 @@ impl AppConfig {
         // loudly, and in production it does not start at all: an account that
         // can never be verified is worse than a refusal at boot.
         let resend_api_key = get("RESEND_API_KEY");
-        let expose_verification_codes = resend_api_key.is_none() && !is_production;
-        if resend_api_key.is_none() {
+        let brevo_api_key = get("BREVO_API_KEY");
+        let has_provider = resend_api_key.is_some() || brevo_api_key.is_some();
+        let expose_verification_codes = !has_provider && !is_production;
+        if !has_provider {
             warnings.push(
-                "RESEND_API_KEY not set, verification codes are logged and returned by the \
-                 API instead of e-mailed (development only)",
+                "no email provider configured (BREVO_API_KEY / RESEND_API_KEY), verification \
+                 codes are logged and returned by the API instead of e-mailed (development only)",
             );
         }
 
@@ -172,8 +189,8 @@ impl AppConfig {
                 .is_some_and(|v| v == "true"),
             security_event_retention_days: i64::from(get_u32("SECURITY_EVENT_RETENTION_DAYS", 90)),
             resend_api_key,
-            email_from: get("EMAIL_FROM")
-                .unwrap_or_else(|| "Sever <onboarding@resend.dev>".into()),
+            brevo_api_key,
+            email_from: get("EMAIL_FROM").unwrap_or_else(|| "Sever <onboarding@resend.dev>".into()),
             email_verification_ttl_minutes: i64::from(get_u32(
                 "EMAIL_VERIFICATION_TTL_MINUTES",
                 10,
@@ -282,14 +299,42 @@ mod tests {
         assert!(config
             .warnings
             .iter()
-            .any(|w| w.contains("RESEND_API_KEY not set")));
+            .any(|w| w.contains("no email provider configured")));
     }
 
     #[test]
     fn a_configured_mail_provider_never_exposes_codes() {
-        let config =
-            AppConfig::from_lookup(lookup_from(&[("RESEND_API_KEY", "re_live_key")])).unwrap();
-        assert!(!config.expose_verification_codes);
+        // Either provider closes the development affordance (ADR-071): the
+        // code stops being returned as soon as something can actually mail it.
+        for key in ["RESEND_API_KEY", "BREVO_API_KEY"] {
+            let config = AppConfig::from_lookup(lookup_from(&[(key, "a_live_key")])).unwrap();
+            assert!(
+                !config.expose_verification_codes,
+                "{key} should have suppressed code exposure"
+            );
+            // The other dev fallbacks still warn here — nothing else is set.
+            // What must be gone is the "no mail provider" one.
+            assert!(
+                !config
+                    .warnings
+                    .iter()
+                    .any(|w| w.contains("no email provider configured")),
+                "{key} should have satisfied the mail-provider check"
+            );
+        }
+    }
+
+    #[test]
+    fn brevo_is_preferred_when_both_providers_are_configured() {
+        let config = AppConfig::from_lookup(lookup_from(&[
+            ("RESEND_API_KEY", "re_live_key"),
+            ("BREVO_API_KEY", "xkeysib_live_key"),
+        ]))
+        .unwrap();
+        // The choice itself is made in `main`; what config guarantees is that
+        // both survive parsing so that choice is possible.
+        assert_eq!(config.brevo_api_key.as_deref(), Some("xkeysib_live_key"));
+        assert_eq!(config.resend_api_key.as_deref(), Some("re_live_key"));
     }
 
     #[test]
@@ -307,7 +352,30 @@ mod tests {
         ]))
         .unwrap_err();
 
-        assert_eq!(err, vec!["RESEND_API_KEY", "EMAIL_FROM"]);
+        assert_eq!(err, vec!["EMAIL_FROM", "BREVO_API_KEY or RESEND_API_KEY"]);
+    }
+
+    #[test]
+    fn either_provider_alone_satisfies_production() {
+        // The point of ADR-071: adding a second provider must not mean needing
+        // both. Brevo alone has to be enough, or the escape from Resend's
+        // domain requirement is not actually available.
+        for key in ["BREVO_API_KEY", "RESEND_API_KEY"] {
+            let config = AppConfig::from_lookup(lookup_from(&[
+                ("APP_ENV", "production"),
+                ("JWT_SECRET", "the-quick-brown-fox-jumps-over-the-lazy-dog"),
+                (
+                    "INTERNAL_API_TOKEN",
+                    "pack-my-box-with-five-dozen-liquor-jugs-ok",
+                ),
+                ("DATABASE_URL", "postgres://x"),
+                ("AGENT_API_URL", "http://agent:8001"),
+                ("EMAIL_FROM", "Sever <no-reply@example.dev>"),
+                (key, "a_live_key"),
+            ]))
+            .unwrap_or_else(|e| panic!("{key} alone should boot production, missing: {e:?}"));
+            assert!(!config.expose_verification_codes);
+        }
     }
 
     #[test]
@@ -346,8 +414,8 @@ mod tests {
                 "INTERNAL_API_TOKEN",
                 "DATABASE_URL",
                 "AGENT_API_URL",
-                "RESEND_API_KEY",
-                "EMAIL_FROM"
+                "EMAIL_FROM",
+                "BREVO_API_KEY or RESEND_API_KEY"
             ]
         );
     }

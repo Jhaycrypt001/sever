@@ -52,10 +52,13 @@ services:
       # Per-account login throttle (ADR-057), email-keyed. Also sizes the
       # separate per-account budget for verification attempts (ADR-062).
       LOGIN_MAX_ATTEMPTS_PER_MINUTE: ${LOGIN_MAX_ATTEMPTS_PER_MINUTE:-10}
-      # E-mail verification (ADR-062). Empty RESEND_API_KEY selects the
-      # development mailer: codes are logged and returned by the API instead of
-      # sent, which is what lets the e2e suite run without a mailbox. Refused
-      # outright when APP_ENV=production.
+      # E-mail verification (ADR-062). With both provider keys empty the
+      # development mailer is selected: codes are logged and returned by the API
+      # instead of sent, which is what lets the e2e suite run without a mailbox.
+      # Refused outright when APP_ENV=production, which needs one of the two.
+      # Brevo wins when both are set (ADR-071) — it is the one that can mail
+      # somebody other than the account owner without a verified domain.
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM: ${EMAIL_FROM:-Sever <onboarding@resend.dev>}
       EMAIL_VERIFICATION_TTL_MINUTES: ${EMAIL_VERIFICATION_TTL_MINUTES:-10}

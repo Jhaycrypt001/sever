@@ -8,7 +8,7 @@ use std::sync::Arc;
 use backend::adapters::auth::{Argon2PasswordHasher, JwtTokenService};
 use backend::adapters::digest::WebhookDigestSender;
 use backend::adapters::dispatch::{HttpJobDispatcher, NoopJobDispatcher};
-use backend::adapters::email::{DevEmailSender, ResendEmailSender};
+use backend::adapters::email::{BrevoEmailSender, DevEmailSender, ResendEmailSender};
 use backend::adapters::http::rate_limit::Limiter;
 use backend::adapters::http::{router_with_limits, AppState, EmailVerificationSetup};
 use backend::adapters::leader_lock::{LeaderLock, NoopLeaderLock};
@@ -158,12 +158,18 @@ async fn serve() {
     // Email transport (ADR-062): a real provider when one is configured, the
     // logging stand-in otherwise. `AppConfig` has already refused to reach this
     // line in production without a key.
-    let mailer: Arc<dyn EmailSender> = match &config.resend_api_key {
-        Some(key) => Arc::new(ResendEmailSender::new(
+    // Brevo first when both are set (ADR-071): it is the one that can reach an
+    // address other than the account owner's without a verified domain.
+    let mailer: Arc<dyn EmailSender> = match (&config.brevo_api_key, &config.resend_api_key) {
+        (Some(key), _) => Arc::new(BrevoEmailSender::new(
             key.clone(),
             config.email_from.clone(),
         )),
-        None => Arc::new(DevEmailSender::default()),
+        (None, Some(key)) => Arc::new(ResendEmailSender::new(
+            key.clone(),
+            config.email_from.clone(),
+        )),
+        (None, None) => Arc::new(DevEmailSender::default()),
     };
 
     // Background loop: the reaper (ADR-016), refresh-token purge (ADR-008)

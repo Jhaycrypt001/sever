@@ -1,12 +1,18 @@
-//! Outbound email adapters (ADR-062).
+//! Outbound email adapters (ADR-062, ADR-071).
 //!
-//! Two implementations of `EmailSender`:
+//! Three implementations of `EmailSender`:
 //!
 //! - [`ResendEmailSender`] posts to Resend's HTTP API. Chosen over SMTP purely
 //!   to avoid a new dependency — `reqwest` is already here for the agent
 //!   dispatcher and the digest webhook, whereas an SMTP client would pull in a
 //!   TLS stack and a MIME builder for one six-digit message. Another provider,
 //!   or `lettre` over SMTP, is one more implementation of the same port.
+//! - [`BrevoEmailSender`] posts to Brevo's HTTP API (ADR-071). Same shape, one
+//!   difference that decides which one a deployment can actually use: Resend
+//!   will only deliver to the account owner's own address until a *domain* is
+//!   verified, whereas Brevo delivers to anyone once a *single sender address*
+//!   is verified. Owning a domain is the better end state; needing one before
+//!   a stranger can register is not.
 //! - [`DevEmailSender`] sends nothing. It logs the code and keeps it in memory
 //!   so development and the test suite do not need a mailbox. It must never be
 //!   reachable in production — `AppConfig` refuses to start there without a
@@ -136,6 +142,84 @@ impl EmailSender for ResendEmailSender {
     }
 }
 
+// ---------------------------------------------------------------- Brevo
+
+/// Splits a `From` header into Brevo's `{name, email}` pair.
+///
+/// `EMAIL_FROM` is written the way a mail header is — `Sever <a@b.dev>` — and
+/// Resend takes it verbatim. Brevo wants the two parts separately, so an
+/// address handed over whole arrives with the angle brackets inside it and is
+/// rejected as malformed. A bare address is accepted too and takes the product
+/// name as its display name.
+fn split_from(from: &str) -> (String, String) {
+    match (from.find('<'), from.rfind('>')) {
+        (Some(open), Some(close)) if close > open => {
+            let name = from[..open].trim().trim_matches('"').trim();
+            let email = from[open + 1..close].trim();
+            let name = if name.is_empty() { PRODUCT } else { name };
+            (name.to_string(), email.to_string())
+        }
+        _ => (PRODUCT.to_string(), from.trim().to_string()),
+    }
+}
+
+pub struct BrevoEmailSender {
+    client: reqwest::Client,
+    api_key: String,
+    sender_name: String,
+    sender_email: String,
+}
+
+impl BrevoEmailSender {
+    pub fn new(api_key: String, from: String) -> Self {
+        let (sender_name, sender_email) = split_from(&from);
+        Self {
+            client: reqwest::Client::new(),
+            api_key,
+            sender_name,
+            sender_email,
+        }
+    }
+}
+
+#[async_trait]
+impl EmailSender for BrevoEmailSender {
+    async fn send_code(
+        &self,
+        to: &str,
+        code: &str,
+        ttl_minutes: i64,
+        purpose: CodePurpose,
+    ) -> Result<(), PortError> {
+        let response = self
+            .client
+            .post("https://api.brevo.com/v3/smtp/email")
+            // Brevo authenticates with its own header, not a bearer token.
+            .header("api-key", &self.api_key)
+            .json(&serde_json::json!({
+                "sender": { "name": self.sender_name, "email": self.sender_email },
+                "to": [{ "email": to }],
+                "subject": subject(code, purpose),
+                "textContent": text_body(code, ttl_minutes, purpose),
+                "htmlContent": html_body(code, ttl_minutes, purpose),
+            }))
+            .send()
+            .await
+            .map_err(|e| PortError(format!("email provider unreachable: {e}")))?;
+
+        let status = response.status();
+        if status.is_success() {
+            return Ok(());
+        }
+        // As with Resend: the provider's own message is what distinguishes an
+        // unverified sender from a quota, and the code is never echoed back.
+        let detail = response.text().await.unwrap_or_default();
+        Err(PortError(format!(
+            "email provider rejected the message ({status}): {detail}"
+        )))
+    }
+}
+
 // ---------------------------------------------------------------- development
 
 /// Sends nothing; records what it would have sent.
@@ -226,6 +310,34 @@ mod tests {
             assert!(!html.contains("http://"));
             assert!(!html.contains("https://"));
         }
+    }
+
+    #[test]
+    fn a_from_header_splits_into_the_pair_brevo_expects() {
+        // The angle-bracket form is what EMAIL_FROM holds and what Resend takes
+        // verbatim; handing it to Brevo whole is rejected as a malformed
+        // address, which would fail every send with the config looking correct.
+        assert_eq!(
+            split_from("Sever <no-reply@example.com>"),
+            ("Sever".to_string(), "no-reply@example.com".to_string())
+        );
+        // A bare address is legal too, and borrows the product name.
+        assert_eq!(
+            split_from("no-reply@example.com"),
+            (PRODUCT.to_string(), "no-reply@example.com".to_string())
+        );
+        // Quoted display names and stray spacing are common in real config.
+        assert_eq!(
+            split_from("\"Sever Security\"  <no-reply@example.com>"),
+            (
+                "Sever Security".to_string(),
+                "no-reply@example.com".to_string()
+            )
+        );
+        // No display name at all must not yield an empty one: Brevo rejects it.
+        let (name, email) = split_from("<no-reply@example.com>");
+        assert_eq!(name, PRODUCT);
+        assert_eq!(email, "no-reply@example.com");
     }
 
     #[test]

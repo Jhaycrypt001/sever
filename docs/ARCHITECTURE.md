@@ -2662,6 +2662,57 @@ connection it has promised not to ask for, or a lie about what KeeperHub can
 execute. Linking out keeps both promises and still leaves the visitor better
 off than they arrived.
 
+### ADR-071 — A second mail provider, because Resend cannot reach strangers (decided 2026-08-05, follows ADR-062)
+
+**Context**: with `RESEND_API_KEY` configured and the default
+`onboarding@resend.dev` sender, registering any address other than the Resend
+account owner's fails:
+
+```
+403 validation_error: You can only send testing emails to your own email
+address (…). To send emails to other recipients, please verify a domain.
+```
+
+Every transactional provider gates sending on a proven identity — that is
+anti-spam, not a Resend quirk. But the *shape* of the proof differs, and it
+decides whether the product works before a domain is bought:
+
+- **Resend** verifies a **domain**. Until one is registered and its DNS records
+  are in place, delivery is limited to the account owner.
+- **Brevo** verifies a **single sender address** — a Gmail is enough — and then
+  delivers to anyone.
+
+ADR-062 was written assuming a mailer existed; it never asked *who that mailer
+is allowed to write to*. Sign-up, per-login codes (ADR-063) and password reset
+all ride on the same transport, so all three were unusable by anyone but the
+operator. A product whose sign-up only works for its author is not a product.
+
+**Decision**: add `BrevoEmailSender` as a second implementation of the existing
+`EmailSender` port, and make the production check provider-agnostic.
+
+1. **Brevo wins when both keys are set.** It is the one that can reach an
+   arbitrary recipient without a domain; a deployment that has configured both
+   has no reason to prefer the more restricted transport.
+2. **Production requires *a* provider, not a named one.** `REQUIRED_IN_PRODUCTION`
+   listed `RESEND_API_KEY` literally, so adding a second provider could not
+   satisfy the boot check. It is now "`BREVO_API_KEY` or `RESEND_API_KEY`", and
+   the error names the choice.
+3. **`EMAIL_FROM` is split for Brevo.** The variable holds a mail header
+   (`Sever <a@b.dev>`), which Resend takes verbatim and Brevo rejects as
+   malformed — it wants `{name, email}`. `split_from` parses both that form and
+   a bare address, and is unit-tested, because a sender that fails to parse
+   fails *every* send while the configuration looks correct.
+4. **Message bodies are shared.** Subject, text and HTML come from the same
+   helpers as ADR-062, so the two providers cannot drift into sending
+   different mail.
+
+**Consequences**: sign-ups work for anyone the day a Brevo key is set, with no
+purchase. The cost is deliverability and appearance — mail sent from a Gmail
+sender lands in spam more often than mail from a verified domain, and it reads
+as less legitimate. That is a real downgrade, and the reason Resend is kept
+rather than replaced: verifying a domain later is a config change, not a code
+change, and the port makes a third provider one more file.
+
 ---
 
 ## 4. API contracts (summary)
