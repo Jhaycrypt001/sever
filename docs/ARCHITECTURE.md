@@ -2777,9 +2777,13 @@ no public domain at all — the internal token is never exposed to the internet.
 Three properties of the platform shape the configuration, and each one is a
 silent failure if missed:
 
-- **The private network is IPv6-only.** A service bound to `0.0.0.0` is
-  invisible to its siblings while looking perfectly healthy on its own card.
-  Every bind is set to `::` or `[::]`.
+- **The health check arrives over IPv4, whatever the private network does.**
+  The network itself is dual-stack, so the original expectation of an IPv6-only
+  fabric was wrong; what actually matters is that a listener answering only IPv6
+  fails the check while its own log reads `Application startup complete`. Rust's
+  `[::]` accepts IPv4 as well and passes; uvicorn's `--host ::` does not, so the
+  agent API binds `0.0.0.0`. The platform also guesses the port unless a `PORT`
+  variable names it, which is a second way to fail while running correctly.
 - **The managed Redis is not Redis Stack.** The LangGraph checkpointer of
   ADR-046 calls `FT.CREATE`, a RediSearch command the plugin does not have, so
   Redis is deployed from the `redis-stack-server` image instead. Falling back to

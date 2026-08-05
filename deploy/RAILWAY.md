@@ -32,9 +32,13 @@ That is why the backend needs no public domain.
 
 ## Three rules that decide whether this works
 
-1. **Bind to IPv6.** Railway's private network is IPv6-only. A service listening
-   on `0.0.0.0` is invisible to its siblings. Every start command and bind
-   address below is already set for this; do not "simplify" them back.
+1. **Bind to every interface, and tell Railway the port.** The private network
+   is dual-stack (`IPv4 & IPv6`), but the health check arrives over IPv4, so a
+   listener that answers only IPv6 fails it while the application log looks
+   perfectly healthy. Rust's `[::]` accepts IPv4 too and is fine; uvicorn's
+   `--host ::` does not, so the agent API binds `0.0.0.0` instead. Railway also
+   guesses the port unless told, so `backend` and `agent-api` each set a `PORT`
+   variable matching what they listen on — 8000 and 8001.
 2. **Redis must be Redis Stack.** `agent/src/aiagent/tasks.py` calls
    `checkpointer.setup()`, which issues `FT.CREATE` — a RediSearch command. The
    managed Redis plugin does not have the module and the worker will crash on
@@ -92,6 +96,7 @@ every `PASTE_` placeholder.
 ```
 APP_ENV=production
 BIND_ADDR=[::]:8000
+PORT=8000
 DATABASE_URL=${{Postgres.DATABASE_URL}}
 AGENT_API_URL=http://agent-api.railway.internal:8001
 INTERNAL_API_TOKEN=PASTE_INTERNAL_API_TOKEN
@@ -121,6 +126,7 @@ would let a `FLUSHDB` from either side clear the other.
 ```
 REDIS_URL=redis://:PASTE_REDIS_PASSWORD@redis.railway.internal:6379/0
 INTERNAL_API_TOKEN=PASTE_INTERNAL_API_TOKEN
+PORT=8001
 ```
 
 ### agent-worker
