@@ -42,6 +42,10 @@ export const metadata: Metadata = {
     'Sever · the agent that revokes the approval draining your wallet',
   description:
     'Sever scans a wallet for malicious ERC-20 approvals and revokes the dangerous ones onchain through KeeperHub, before a drainer gets to use them.',
+  // The shield over a severed link, matching the header wordmark. The PNGs
+  // are per-scheme because a single fixed colour vanishes into one of the two
+  // tab strips; the SVG carries its own media query and is preferred wherever
+  // it is supported.
   icons: {
     icon: [
       {
