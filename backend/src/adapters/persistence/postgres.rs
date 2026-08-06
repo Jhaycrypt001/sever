@@ -23,6 +23,15 @@ use crate::domain::{CodePurpose, EmailVerification, SecurityEvent};
 /// so every replica contends on the same lock.
 const SCHEDULER_LOCK_KEY: i64 = 918_273_645;
 
+/// Ceiling on rows read for a user's scan history (ADR-075).
+///
+/// Deliberately above `SearchQueries::HISTORY_LIMIT`: the use case decides
+/// what the console is served, and this only stops the database reading an
+/// unbounded number of rows to satisfy it. The quota check counts with
+/// `count_created_since` rather than this list, so capping here cannot
+/// under-count anyone's usage.
+const HISTORY_FETCH_LIMIT: i64 = 200;
+
 /// A `LeaderLock` backed by a PostgreSQL **session advisory lock**
 /// (`pg_try_advisory_lock`). Only one replica can hold the key at a time, so
 /// only one runs the background loop per tick (ADR-053). The connection that
@@ -609,9 +618,10 @@ impl JobRepository for PostgresJobRepository {
             "SELECT id, user_id, wallet_address, mode, status, error, question, answer, recurring_search_id,
                     llm_calls, llm_input_tokens, llm_output_tokens, search_calls, cost_usd,
                     created_at, completed_at
-             FROM scan_jobs WHERE user_id = $1 ORDER BY created_at DESC",
+             FROM scan_jobs WHERE user_id = $1 ORDER BY created_at DESC LIMIT $2",
         )
         .bind(user_id)
+        .bind(HISTORY_FETCH_LIMIT)
         .fetch_all(&self.pool)
         .await
         .map_err(db_err)?;

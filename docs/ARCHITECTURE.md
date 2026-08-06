@@ -2857,6 +2857,38 @@ implementation against the one adapter the product depends on. It is
 
 ---
 
+### ADR-075 — The scan history is capped (decided 2026-08-06)
+
+**Context**: `GET /api/searches` returned every scan an account had ever run,
+unpaginated, and the console fetches it on every load. Found by an operator who
+had scanned a few hundred times while testing: the panel is a fixed-height
+scroll box showing about a dozen rows, so the response grew without bound to
+render a view whose size never changes. `ORDER BY created_at DESC` with no
+`LIMIT` reads the whole partition for the user, serialises it, ships it, and
+the client renders all of it into a box 420px tall.
+
+Nothing was visibly broken, which is why it survived: the scroll box hides the
+symptom, and every test ran against accounts with a handful of jobs.
+
+**Decision**: the read use case serves the 50 most recent scans, and the
+Postgres adapter refuses to read more than 200 rows to satisfy that. Two
+numbers rather than one, because they answer different questions — the use case
+decides what a console is *for* (recent activity), the adapter puts a ceiling on
+what a single query may cost. Older scans stay reachable individually by id.
+
+The count in the panel header reads `50+ · most recent` at the cap. A bare
+`50` would state, to someone who has run three hundred scans, that they have
+run fifty.
+
+**Consequences**: the quota check is unaffected — it counts with
+`count_created_since`, a separate `COUNT(*)`, so capping the list cannot
+under-count usage and hand out free searches. Proper pagination is the eventual
+answer if anyone needs to page back through history; a cap is not that, and is
+deliberately the smaller change. Rejected: capping only in the frontend, which
+leaves the database and the wire paying for rows nobody renders.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)

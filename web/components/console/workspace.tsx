@@ -287,6 +287,14 @@ function Launcher({
 
 /* ----------------------------------------------------------------- scan list */
 
+/**
+ * Mirrors `SearchQueries::HISTORY_LIMIT` on the backend (ADR-075).
+ *
+ * Only used to decide whether the count is showing everything or a capped
+ * window — the cap itself is the server's, and this never asks for more.
+ */
+const HISTORY_LIMIT = 50
+
 function ScanList({
   jobs,
   selectedId,
@@ -298,9 +306,15 @@ function ScanList({
 }) {
   return (
     <section className="rounded-lg border border-white/[0.08] bg-white/[0.015]">
+      {/*
+        The count says "50+" at the cap rather than a flat 50, because the
+        server sends the most recent 50 (ADR-075) and a bare "50" would read
+        as "you have run 50 scans" to someone who has run three hundred.
+      */}
       <header className="border-b border-white/[0.06] px-4 py-3">
         <span className="font-mono text-[10px] uppercase tracking-[0.12em] text-white/40">
           Scans · {jobs.length}
+          {jobs.length >= HISTORY_LIMIT ? '+ · most recent' : ''}
         </span>
       </header>
       {jobs.length === 0 ? (
