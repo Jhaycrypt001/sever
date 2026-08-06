@@ -20,7 +20,12 @@ const EASE = [0.16, 1, 0.3, 1] as const
 
 function AnnouncementBanner({ onClose }: { onClose: () => void }) {
   return (
-    <div className="relative flex items-center justify-center gap-4 bg-[#fafafa] px-12 py-3 text-[#0a0a0a]">
+    // The link used to be `hidden sm:inline-block`, which took the single
+    // piece of external proof on the page away from every phone reader — the
+    // one claim here a stranger can check for themselves. It was hidden
+    // because the row could not hold both at 390px, so the row stacks
+    // instead of the link disappearing.
+    <div className="relative flex flex-col items-center justify-center gap-2 bg-[#fafafa] px-12 py-3 text-[#0a0a0a] sm:flex-row sm:gap-4">
       <p className="text-center text-sm">
         Every revocation is a real onchain transaction. Here is the first one.
       </p>
@@ -28,7 +33,7 @@ function AnnouncementBanner({ onClose }: { onClose: () => void }) {
         href={SEPOLIA_TX_URL}
         target="_blank"
         rel="noreferrer"
-        className="hidden shrink-0 rounded-full border border-[#0a0a0a]/20 px-4 py-1.5 text-sm font-semibold transition-colors hover:bg-[#0a0a0a] hover:text-[#fafafa] sm:inline-block"
+        className="shrink-0 rounded-full border border-[#0a0a0a]/20 px-4 py-1.5 text-sm font-semibold transition-colors hover:bg-[#0a0a0a] hover:text-[#fafafa]"
       >
         View on Etherscan
       </a>

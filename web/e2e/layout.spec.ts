@@ -118,6 +118,64 @@ test('the header folds on the way down and unfolds on the way up', async ({
   )
 })
 
+// The hero screenshot is 1440px of console. Held at that width on a phone the
+// viewport crops a strip out of its middle, so the reader sees fragments of
+// two cards rather than a product - and the caption's negative margin, which
+// on desktop lands on the faded foot of a tilted image, printed straight
+// across a finding card instead.
+//
+// Neither shows up as sideways scroll: the image sat inside a clipping
+// ancestor, so the existing overflow test passed throughout.
+test('the hero console fits the screen on a phone', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/')
+  await page.waitForTimeout(1200)
+
+  const shot = page.locator('img[src*="console"]').first()
+  const box = await shot.boundingBox()
+  expect(box, 'the console screenshot should be laid out').not.toBeNull()
+
+  // Whole, not a crop: no wider than the screen it is being read on.
+  expect(box!.width).toBeLessThanOrEqual(391)
+
+  // And big enough to read as a console rather than a thumbnail.
+  expect(box!.width).toBeGreaterThan(200)
+})
+
+test('the hero caption does not sit on top of the console on a phone', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/')
+  await page.waitForTimeout(1200)
+
+  const shot = await page.locator('img[src*="console"]').first().boundingBox()
+  const caption = await page
+    .getByText(/A real scan of a real wallet/)
+    .boundingBox()
+
+  expect(shot).not.toBeNull()
+  expect(caption).not.toBeNull()
+
+  // The caption starts below the image's last row.
+  expect(
+    caption!.y,
+    'the caption is overlapping the console screenshot',
+  ).toBeGreaterThanOrEqual(shot!.y + shot!.height - 1)
+})
+
+test('the Etherscan proof link is reachable on a phone', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.goto('/')
+  await page.waitForTimeout(800)
+
+  // This is the one claim on the page a stranger can verify independently.
+  // It was `hidden sm:inline-block`, so no phone reader could ever open it.
+  await expect(
+    page.getByRole('link', { name: 'View on Etherscan' }),
+  ).toBeVisible()
+})
+
 test('the mobile menu opens and closes', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto('/')
