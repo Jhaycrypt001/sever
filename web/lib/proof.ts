@@ -66,15 +66,15 @@ export const SUPPORTED_CHAINS = [
 
 export const CHAIN_COUNT = SUPPORTED_CHAINS.length
 
-/** Counted on 2026-08-04. Update these with the numbers, never by feel. */
+/** Counted on 2026-08-06. Update these with the numbers, never by feel. */
 export const TEST_COUNTS = {
-  python: 237,
+  python: 239,
   rust: 201,
   postgres: 20,
   browser: 22,
 } as const
 
-export const ADR_COUNT = 73
+export const ADR_COUNT = 74
 export const MIGRATION_RANGE = '0001 – 0015'
 
 export const REPO_URL = 'https://github.com/Jhaycrypt001/sever'

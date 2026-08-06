@@ -8,7 +8,7 @@ signature, no seed phrase, no gas from you.**
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](agent/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)](web/)
 [![Docker](https://img.shields.io/badge/Docker-compose-2496ED?logo=docker&logoColor=white)](docker-compose.yml)
-[![ADRs](https://img.shields.io/badge/ADRs-73-8A2BE2)](docs/ARCHITECTURE.md)
+[![ADRs](https://img.shields.io/badge/ADRs-74-8A2BE2)](docs/ARCHITECTURE.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ## In 30 seconds
@@ -186,13 +186,13 @@ agent/src/aiagent/adapters/     # goplus, keeperhub, llm, deterministic, sink, a
 web/app/                        # / (public page) and /console (operator surface)
 web/lib/api.ts                  # zod schemas — the wire contract, validated at runtime
 contracts/                      # golden fixtures asserted on both sides of every boundary
-docs/                           # ARCHITECTURE.md (73 ADRs), COMMANDS.md, diagrams/
+docs/                           # ARCHITECTURE.md (74 ADRs), COMMANDS.md, diagrams/
 ```
 
 ## Documentation
 
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — every technical decision
-  (ADR-001 → ADR-073) with the rejected alternatives, kept in sync with the
+  (ADR-001 → ADR-074) with the rejected alternatives, kept in sync with the
   code. Start at **ADR-058** (the product), **ADR-059** (the security audit of
   the execution path) and **ADR-060** (why the protection does not depend on a
   model).
