@@ -2809,12 +2809,51 @@ actually works", is `deploy/RAILWAY.md`.
 Verified end to end on 2026-08-05 against the deployed console: registration by
 a previously unknown address, delivery of the code by e-mail, the ADR-063 second
 factor on sign-in, and a scan reaching all three chains and classifying a live
-approval. One incidental finding is recorded here because it looks like a bug
-and is not: GoPlus answers `code 2029` on a *supported* chain when the anonymous
-tier is rate-limited, and the same request succeeds moments later. ADR-064 turns
-that into a `degraded` chain and a partial report rather than a lost run, which
-is the designed behaviour — but a deployment meant to be watched should set
-`GOPLUS_API_KEY` so the question does not arise.
+approval. One incidental finding surfaced there and is carried into ADR-074:
+GoPlus answers `code 2029` on a *supported* chain when the anonymous tier is
+rate-limited, which ADR-066 had read as a settled "chain not served".
+
+---
+
+### ADR-074 — `2029` is the throttle as well as the refusal (decided 2026-08-06, revisits ADR-066)
+
+**Context**: ADR-066 probed 17 chain ids and concluded that `2029` is a settled
+answer about the chain, so it is not retried. That inference held for every
+chain in the probe and is still wrong. On 2026-08-05, scanning from the
+deployed stack, Ethereum answered `2029` twice and then returned a full
+approval list seconds later for a byte-identical request. The code is
+overloaded: it means "this chain is not served" *and* "you are being
+throttled", and nothing in the response distinguishes them.
+
+The consequence was quiet, which is what makes it worth an ADR. Nothing
+crashed and no test failed. ADR-064 marked Ethereum `degraded` and the report
+went out covering BSC and Base — a correct-looking scan that silently omitted
+the chain most approvals live on, on the anonymous tier every unfunded
+deployment runs.
+
+**Decision**: retry `2029` on the same bounded, linear backoff already used for
+`code 2`. If it survives the retries the chain is still reported unscanned, but
+the error names both possible causes instead of asserting the one that happens
+to be wrong.
+
+Retrying costs a few wasted round-trips on a genuinely unsupported chain, which
+is bounded and only reached by a misconfigured `AGENT_SCAN_CHAIN_IDS`. Not
+retrying costs a silently incomplete report on a supported one. The asymmetry
+decides it.
+
+**Consequences**: `_RETRYABLE` now holds two codes for opposite reasons — `2`
+because the *address* is cold, `2029` because the *caller* is throttled — and
+the log line names the code rather than asserting "still indexing", which was
+already misleading for one of the two.
+
+Authenticating would reduce the throttling at the source, and the adapter does
+send `GOPLUS_API_KEY` as an `Authorization` header today. That is not GoPlus's
+scheme: an App Key and Secret are exchanged for a short-lived access token
+which is what the header expects, so a key set this way authenticates nothing
+and silently leaves the caller anonymous. Deliberately not fixed here — the
+retry closes the operational gap, and the token exchange is a signed-request
+implementation against the one adapter the product depends on. It is
+`ROADMAP.md` P2 rather than a five-day-out change.
 
 ---
 

@@ -33,8 +33,19 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://api.gopluslabs.io/api/v2/token_approval_security"
 
 #: "partial data obtained" — GoPlus is still indexing the address. Transient
-#: (ADR-066), unlike 2018 (unknown chain) or 2029 (chain not served here).
+#: (ADR-066), unlike 2018, which is a settled "no such chain".
 _CODE_PARTIAL = 2
+
+#: Returned both when a chain is genuinely not served *and* when a served
+#: chain is being throttled — the anonymous tier answers the two identically
+#: (ADR-074). Retried, because on the three chains we scan the first reading
+#: is wrong: Ethereum answered 2029 twice in a row and then returned a full
+#: approval list seconds later, unchanged request.
+_CODE_UNAVAILABLE = 2029
+
+#: Codes worth trying again. Anything else is a settled answer, and retrying
+#: it only makes every scan slower.
+_RETRYABLE = frozenset({_CODE_PARTIAL, _CODE_UNAVAILABLE})
 
 
 def _spender_info(approval: dict[str, Any]) -> dict[str, Any]:
@@ -125,7 +136,8 @@ class GoPlusApprovalSource:
             )
             response.raise_for_status()
             payload = response.json()
-            if payload.get("code") != _CODE_PARTIAL:
+            code = payload.get("code")
+            if code not in _RETRYABLE:
                 break
             # ADR-066: `code 2` means GoPlus is still indexing this address and
             # what it has is incomplete. It clears on its own — confirmed live:
@@ -133,9 +145,18 @@ class GoPlusApprovalSource:
             # later returns 1 with the full set. Treating it as a hard error
             # threw away a whole chain on the *first* scan of any wallet, which
             # is the scan every new user runs.
+            #
+            # ADR-074: `2029` is retried for the opposite reason — not because
+            # the address is cold but because the *caller* is throttled, and
+            # the anonymous tier reports that with the same code it uses for a
+            # chain it does not serve. On an unsupported chain the retries are
+            # wasted but bounded; on a supported one they are the difference
+            # between a report covering Ethereum and one that silently does
+            # not.
             if attempt < self._partial_retries:
                 logger.info(
-                    "GoPlus still indexing chain %s, retrying (%d/%d)",
+                    "GoPlus returned code %s for chain %s, retrying (%d/%d)",
+                    code,
                     chain_id,
                     attempt + 1,
                     self._partial_retries,
@@ -149,6 +170,16 @@ class GoPlusApprovalSource:
             # and the code is carried too: it is the only part an operator can
             # look up in their docs.
             message = payload.get("message") or "no message"
+            # 2029 survives the retries either because the chain really is not
+            # served or because the throttling outlasted them, and the response
+            # cannot tell the two apart (ADR-074). Say so, rather than leaving
+            # an operator to conclude the chain is unsupported when their scan
+            # was simply rate-limited.
+            if payload.get("code") == _CODE_UNAVAILABLE:
+                message = (
+                    f"{message} - chain not served, or the caller is rate-limited; "
+                    "these are indistinguishable on the anonymous tier"
+                )
             # Partial data is never merged in as if it were the whole picture:
             # an incomplete approval list rendered as a finished scan is a
             # coverage lie (ADR-059/064). The chain is reported unscanned.

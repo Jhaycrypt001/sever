@@ -306,8 +306,9 @@ def test_persistent_partial_data_is_reported_rather_than_half_delivered() -> Non
 
 @respx.mock
 def test_a_permanent_error_code_is_not_retried() -> None:
-    # 2018/2029 are settled answers about the chain itself; retrying only
-    # slows every scan down for nothing.
+    # 2018 is a settled answer about the chain itself - there is no such chain,
+    # and no number of retries invents one. Retrying it only slows every scan
+    # down for nothing. (2029 is *not* in this category: see below.)
     route = respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/10").mock(
         return_value=httpx.Response(
             200, json={"code": 2018, "message": "Main chain does not exist!"}
@@ -318,3 +319,55 @@ def test_a_permanent_error_code_is_not_retried() -> None:
         GoPlusApprovalSource(partial_retries=3, partial_retry_delay=0).fetch_approvals(WALLET, "10")
 
     assert route.call_count == 1
+
+
+@respx.mock
+def test_a_throttled_chain_is_retried_and_succeeds_on_the_follow_up() -> None:
+    """`2029` is not only "chain not served" — it is also the throttle (ADR-074).
+
+    Observed live on 2026-08-05: Ethereum answered 2029 twice for a wallet,
+    then returned a full approval list seconds later for the identical
+    request. Read as a settled answer, that scan silently reported Ethereum
+    as unscannable while the product's headline chain was working fine.
+    """
+    route = respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1")
+    route.side_effect = [
+        httpx.Response(200, json={"code": 2029, "message": None}),
+        httpx.Response(
+            200,
+            json={
+                "code": 1,
+                "result": [
+                    {
+                        "token_address": "0xtoken",
+                        "token_symbol": "WETH",
+                        "approved_list": [
+                            {
+                                "approved_contract": "0xspender",
+                                "approved_amount": "1000",
+                                "address_info": {"is_open_source": 1},
+                            }
+                        ],
+                    }
+                ],
+            },
+        ),
+    ]
+
+    approvals = GoPlusApprovalSource(partial_retry_delay=0).fetch_approvals(WALLET, "1")
+
+    assert route.call_count == 2
+    assert [a.token_symbol for a in approvals] == ["WETH"]
+
+
+@respx.mock
+def test_a_chain_that_stays_unavailable_says_why_it_might_be() -> None:
+    # After the retries the two causes are still indistinguishable, so the
+    # error names both rather than letting an operator conclude the chain is
+    # unsupported when they were simply rate-limited.
+    respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
+        return_value=httpx.Response(200, json={"code": 2029, "message": None})
+    )
+
+    with pytest.raises(RuntimeError, match="rate-limited"):
+        GoPlusApprovalSource(partial_retries=2, partial_retry_delay=0).fetch_approvals(WALLET, "1")

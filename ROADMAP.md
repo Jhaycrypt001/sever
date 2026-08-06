@@ -89,6 +89,15 @@ Manual setup and deployment steps live in [SETUP.md](SETUP.md).
 
 ## P2 — Operability
 
+- [ ] **Authenticate to GoPlus properly (ADR-074)** — the adapter sends
+      `GOPLUS_API_KEY` as an `Authorization` header, which is not the scheme:
+      an App Key and Secret are exchanged at `/api/v1/token` for a short-lived
+      access token, and that is what the header expects. A key set today
+      authenticates nothing and leaves every call on the anonymous tier, which
+      is what makes `2029` throttling common enough to have needed the retry.
+      Needs a signed request (SHA-1 of key + timestamp + secret), a cached
+      token with expiry, and refresh on 401.
+
 - [x] **End-to-end correlation (ADR-018)** — done: `X-Request-Id` middleware on
       the Rust API, `job_id` propagated Rust → FastAPI → Celery → callbacks,
       `LOG_FORMAT=json` structured logs on all three server processes
