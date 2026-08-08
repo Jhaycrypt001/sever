@@ -13,6 +13,7 @@ import {
 } from '@/lib/api'
 import { chainName, truncateAddress } from '@/lib/chains'
 import { cn } from '@/lib/utils'
+import { SelectField } from '@/components/ui/select-field'
 import { FindingsTable } from './findings-table'
 import { KeeperHubKeyPanel } from './keeperhub-key'
 import { Journal } from './journal'
@@ -242,15 +243,14 @@ function Launcher({
               by design (ADR-030/058) and agent mode auto-revokes. Naming them
               after the internals would hide exactly the thing a user must
               understand before clicking. */}
-          <select
+          <SelectField
             id="mode"
             value={mode}
             onChange={(e) => setMode(e.target.value as JobMode)}
-            className="h-11 rounded border border-white/[0.12] bg-black/40 px-3 font-mono text-sm text-white focus:border-white/40 focus:outline-none"
           >
             <option value="workflow">Report only · never revokes</option>
             <option value="agent">Auto-revoke the dangerous ones</option>
-          </select>
+          </SelectField>
         </label>
 
         <button
