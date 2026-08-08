@@ -38,7 +38,10 @@ impl KeeperHubDirectory for HttpKeeperHubDirectory {
         let response = self
             .client
             .get(format!("{}/api/user", self.base_url))
-            .header("Authorization", api_key)
+            // `Bearer `, matching the worker's revoker. Without the scheme
+            // KeeperHub answers 401 and a perfectly good key is reported back
+            // to the user as unrecognised.
+            .header("Authorization", format!("Bearer {api_key}"))
             .send()
             .await
             // Deliberately does not include the source error: it can carry the
@@ -131,9 +134,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(wallet.as_deref(), Some(WALLET));
-        // The key goes in the Authorization header, which is how KeeperHub
-        // authenticates the caller.
-        assert_eq!(seen.lock().unwrap().as_slice(), &["kh_test".to_string()]);
+        // The `Bearer ` scheme is the whole point of this assertion: the worker
+        // sends it, KeeperHub requires it, and sending the bare key instead
+        // returns 401 — which this adapter reports as "not recognised", so a
+        // valid key looks invalid to the user. Asserting the exact header is
+        // what stops that from coming back.
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &["Bearer kh_test".to_string()]
+        );
     }
 
     #[tokio::test]
