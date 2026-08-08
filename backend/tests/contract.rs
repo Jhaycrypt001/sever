@@ -20,7 +20,7 @@ use backend::adapters::persistence::in_memory::{
     InMemoryEmailVerificationRepository, InMemoryJobRepository, InMemoryRecurringSearchRepository,
     InMemoryRefreshTokenRepository, InMemorySecurityAudit, InMemoryUserRepository,
 };
-use backend::domain::ports::JobDispatcher;
+use backend::domain::ports::{DispatchContext, JobDispatcher};
 use backend::domain::{JobMode, ScanJob};
 
 const ADDR: &str = "0x1234567890123456789012345678901234567890";
@@ -262,7 +262,10 @@ async fn backend_produces_the_task_request_fixture() {
         .unwrap()
         .with_mode(JobMode::Agent);
     job.id = Uuid::parse_str("3fa85f64-5717-4562-b3fc-2c963f66afa6").unwrap();
-    dispatcher.dispatch(&job, &[]).await.unwrap();
+    dispatcher
+        .dispatch(&job, DispatchContext::default())
+        .await
+        .unwrap();
 
     let expected: Value = serde_json::from_str(&fixture("task-request.json")).unwrap();
     assert_eq!(captured.lock().unwrap().as_slice(), &[expected]);
@@ -398,7 +401,7 @@ async fn backend_consumes_the_usage_callback_fixture() {
 /// (`web/lib/__tests__/contract.test.ts`).
 #[tokio::test]
 async fn backend_produces_the_public_contract_fixtures() {
-    use backend::adapters::http::{job_detail_json, recurring_search_json};
+    use backend::adapters::http::{job_detail_json, keeperhub_key_json, recurring_search_json};
     use backend::domain::{
         AgentStep, ApprovalFinding, JobStatus, JobUsage, RecurringSearch, RevocationStatus,
         RiskTier,
@@ -501,6 +504,20 @@ async fn backend_produces_the_public_contract_fixtures() {
         recurring_search_json(&recurring),
         expected_recurring,
         "recurring wire shape drifted from the fixture"
+    );
+
+    // ADR-076. Equality, not a subset check: this is the one shape whose
+    // *absent* fields matter, because any added field is a candidate for
+    // leaking the key back to the browser.
+    let connected = backend::application::ConnectedKey {
+        wallet_address: Some("0xe13ed9793d4b3e0b2b3a3c3f5c2d1e0a9b8c7d6e".into()),
+        masked: "••••wxyz".into(),
+    };
+    let expected_key: Value = serde_json::from_str(&fixture("keeperhub-key.json")).unwrap();
+    assert_eq!(
+        keeperhub_key_json(connected),
+        expected_key,
+        "KeeperHub key wire shape drifted from the fixture"
     );
 }
 

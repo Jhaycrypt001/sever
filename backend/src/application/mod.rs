@@ -1,6 +1,7 @@
 pub mod answer_clarification;
 pub mod fail_stale_jobs;
 pub mod ingest_results;
+pub mod keeperhub_key;
 pub mod launch_search;
 pub mod login_user;
 pub mod password_reset;
@@ -15,6 +16,7 @@ pub mod verify_email;
 pub use answer_clarification::AnswerClarification;
 pub use fail_stale_jobs::FailStaleJobs;
 pub use ingest_results::IngestResults;
+pub use keeperhub_key::{ConnectedKey, KeeperHubKeyError, KeeperHubKeys};
 pub use launch_search::LaunchSearch;
 pub use login_user::LoginUser;
 pub use password_reset::{RequestPasswordReset, ResetPassword};

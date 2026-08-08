@@ -11,22 +11,26 @@ use backend::adapters::dispatch::{HttpJobDispatcher, NoopJobDispatcher};
 use backend::adapters::email::{BrevoEmailSender, DevEmailSender, ResendEmailSender};
 use backend::adapters::http::rate_limit::Limiter;
 use backend::adapters::http::{router_with_limits, AppState, EmailVerificationSetup};
+use backend::adapters::keeperhub::HttpKeeperHubDirectory;
 use backend::adapters::leader_lock::{LeaderLock, NoopLeaderLock};
 use backend::adapters::persistence::in_memory::{
-    InMemoryEmailVerificationRepository, InMemoryJobRepository, InMemoryRecurringSearchRepository,
+    InMemoryEmailVerificationRepository, InMemoryJobRepository,
+    InMemoryKeeperHubCredentialRepository, InMemoryRecurringSearchRepository,
     InMemoryRefreshTokenRepository, InMemorySecurityAudit, InMemoryUserRepository,
 };
 use backend::adapters::persistence::postgres::{
-    run_migrations, PostgresEmailVerificationRepository, PostgresJobRepository, PostgresLeaderLock,
-    PostgresRecurringSearchRepository, PostgresRefreshTokenRepository, PostgresSecurityAudit,
-    PostgresUserRepository,
+    run_migrations, PostgresEmailVerificationRepository, PostgresJobRepository,
+    PostgresKeeperHubCredentialRepository, PostgresLeaderLock, PostgresRecurringSearchRepository,
+    PostgresRefreshTokenRepository, PostgresSecurityAudit, PostgresUserRepository,
 };
-use backend::application::{FailStaleJobs, RunDueSearches};
+use backend::application::{FailStaleJobs, KeeperHubKeys, RunDueSearches};
 use backend::config::AppConfig;
 use backend::domain::ports::{
     EmailSender, EmailVerificationRepository, JobDispatcher, JobRepository,
-    RecurringSearchRepository, RefreshTokenRepository, SecurityAudit, UserRepository,
+    KeeperHubCredentialRepository, RecurringSearchRepository, RefreshTokenRepository,
+    SecurityAudit, UserRepository,
 };
+use backend::domain::secret_box::SecretBox;
 use sqlx::postgres::PgPoolOptions;
 
 fn main() {
@@ -120,8 +124,10 @@ async fn serve() {
         Arc<dyn EmailVerificationRepository>,
         // Single-leader gate for the background loop (ADR-053).
         Arc<dyn LeaderLock>,
+        // Per-user KeeperHub API keys, encrypted at rest (ADR-076).
+        Arc<dyn KeeperHubCredentialRepository>,
     );
-    let (users, jobs, refresh_tokens, recurring, audit, verifications, leader): Repos =
+    let (users, jobs, refresh_tokens, recurring, audit, verifications, leader, credentials): Repos =
         match &config.database_url {
             Some(url) => {
                 let pool = PgPoolOptions::new()
@@ -140,7 +146,8 @@ async fn serve() {
                     Arc::new(PostgresRecurringSearchRepository::new(pool.clone())),
                     Arc::new(PostgresSecurityAudit::new(pool.clone())),
                     Arc::new(PostgresEmailVerificationRepository::new(pool.clone())),
-                    Arc::new(PostgresLeaderLock::new(pool)),
+                    Arc::new(PostgresLeaderLock::new(pool.clone())),
+                    Arc::new(PostgresKeeperHubCredentialRepository::new(pool)),
                 )
             }
             None => (
@@ -152,6 +159,7 @@ async fn serve() {
                 Arc::new(InMemoryEmailVerificationRepository::default()),
                 // A single in-memory instance always leads.
                 Arc::new(NoopLeaderLock),
+                Arc::new(InMemoryKeeperHubCredentialRepository::default()),
             ),
         };
 
@@ -172,6 +180,32 @@ async fn serve() {
         (None, None) => Arc::new(DevEmailSender::default()),
     };
 
+    // Per-user KeeperHub keys (ADR-076). Built here rather than inside
+    // `AppState` because the background scheduler needs the *same* instance:
+    // an unattended run is the one that most needs the owner's own key.
+    // An unparseable key disables the feature with a warning instead of
+    // aborting the boot — a bad value must not take the whole API down.
+    let keeperhub_keys: Option<Arc<KeeperHubKeys>> = config
+        .credential_encryption_key
+        .as_deref()
+        .and_then(|encoded| match SecretBox::from_base64(encoded) {
+            Ok(secrets) => Some(Arc::new(KeeperHubKeys::new(
+                credentials.clone(),
+                Arc::new(HttpKeeperHubDirectory::new(
+                    config.keeperhub_api_url.clone(),
+                )),
+                audit.clone(),
+                secrets,
+            ))),
+            Err(_) => {
+                tracing::error!(
+                    "CREDENTIAL_ENCRYPTION_KEY is not 32 base64-encoded bytes: \
+                     per-user KeeperHub keys are disabled (ADR-076)"
+                );
+                None
+            }
+        });
+
     // Background loop: the reaper (ADR-016), refresh-token purge (ADR-008)
     // and the recurring-search scheduler (ADR-033) share one ticker.
     let reaper = FailStaleJobs::new(
@@ -183,7 +217,8 @@ async fn serve() {
         jobs.clone(),
         dispatcher.clone(),
         config.daily_search_quota,
-    );
+    )
+    .with_keeperhub_keys(keeperhub_keys.clone());
     let refresh_tokens_for_reaper = refresh_tokens.clone();
     let verifications_for_reaper = verifications.clone();
     let audit_for_purge = audit.clone();
@@ -270,7 +305,8 @@ async fn serve() {
         config.internal_token,
         config.daily_search_quota,
         config.refresh_token_days,
-    );
+    )
+    .with_shared_keeperhub_keys(keeperhub_keys);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr)
         .await

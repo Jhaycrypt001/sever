@@ -29,7 +29,15 @@ class RecordingDelay:
         self.calls: list[dict] = []
 
     def __call__(
-        self, job_id, wallet_address, request_id, mode, clarification, recurring, seen_approval_keys
+        self,
+        job_id,
+        wallet_address,
+        request_id,
+        mode,
+        clarification,
+        recurring,
+        seen_approval_keys,
+        keeperhub_api_key,
     ) -> None:
         self.calls.append(
             {
@@ -40,6 +48,7 @@ class RecordingDelay:
                 "clarification": clarification,
                 "recurring": recurring,
                 "seen_approval_keys": seen_approval_keys,
+                "keeperhub_api_key": keeperhub_api_key,
             }
         )
 
@@ -144,3 +153,49 @@ def test_enqueue_forwards_the_seen_approval_keys(monkeypatch) -> None:
 
     # Default: empty memory (dispatches from pre-ADR-033 backends included).
     assert [c["seen_approval_keys"] for c in recorder.calls] == [["1:0xtoken:0xspender"], []]
+
+
+def test_enqueue_forwards_the_owners_keeperhub_key(monkeypatch) -> None:
+    """ADR-076: the scanning account's own key rides with the job so the
+    worker executes as *their* delegated wallet. A dispatch without one
+    (unconnected account, or a pre-ADR-076 backend) falls back to the
+    worker's environment key, so the field must default to None."""
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "right-token")
+    recorder = RecordingDelay()
+    monkeypatch.setattr(api_module.run_scan_task, "delay", recorder)
+
+    client.post(
+        "/tasks",
+        json={
+            "job_id": "j1",
+            "wallet_address": "0xabc",
+            "keeperhub_api_key": "kh_owner",
+        },
+        headers={"X-Internal-Token": "right-token"},
+    )
+    client.post(
+        "/tasks",
+        json={"job_id": "j2", "wallet_address": "0xabc"},
+        headers={"X-Internal-Token": "right-token"},
+    )
+
+    assert [c["keeperhub_api_key"] for c in recorder.calls] == ["kh_owner", None]
+
+
+def test_the_response_never_echoes_the_key(monkeypatch) -> None:
+    """The key must not travel back out: response bodies land in browser
+    devtools, proxy logs and error trackers."""
+    monkeypatch.setenv("INTERNAL_API_TOKEN", "right-token")
+    monkeypatch.setattr(api_module.run_scan_task, "delay", RecordingDelay())
+
+    response = client.post(
+        "/tasks",
+        json={
+            "job_id": "j1",
+            "wallet_address": "0xabc",
+            "keeperhub_api_key": "kh_owner",
+        },
+        headers={"X-Internal-Token": "right-token"},
+    )
+
+    assert "kh_owner" not in response.text

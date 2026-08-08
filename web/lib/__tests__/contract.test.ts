@@ -14,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 import {
   approvalFindingSchema,
+  keeperHubKeySchema,
   recurringScanSchema,
   revocationStatusSchema,
   scanJobDetailSchema,
@@ -39,6 +40,24 @@ describe('public API contract', () => {
   it('parses the recurring-scan fixture', () => {
     const recurring = recurringScanSchema.parse(fixture('recurring-search'))
     expect(recurring.interval_minutes).toBeGreaterThan(0)
+  })
+
+  it('parses the connected-KeeperHub-key fixture', () => {
+    const key = keeperHubKeySchema.parse(fixture('keeperhub-key'))
+    expect(key.wallet_address).toMatch(/^0x[a-fA-F0-9]{40}$/)
+    expect(key.masked).toMatch(/^•+/)
+  })
+
+  it('has nowhere to put a KeeperHub key (ADR-076)', () => {
+    // The point of the shape, not an incidental property: a backend that
+    // started echoing the key back would land in browser devtools and error
+    // trackers, so the console refuses to carry a field for it. zod strips
+    // unknown keys, so this asserts the parsed object, not the input.
+    const parsed = keeperHubKeySchema.parse({
+      ...(fixture('keeperhub-key') as object),
+      api_key: 'kh_leaked',
+    })
+    expect(JSON.stringify(parsed)).not.toContain('kh_leaked')
   })
 
   it('parses each finding in the results callback', () => {

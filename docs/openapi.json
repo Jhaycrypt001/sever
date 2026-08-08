@@ -672,6 +672,137 @@
           }
         ]
       }
+    },
+    "/api/settings/keeperhub-key": {
+      "get": {
+        "tags": [
+          "settings"
+        ],
+        "operationId": "get_keeperhub_key",
+        "responses": {
+          "200": {
+            "description": "The connected key, or null",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "$ref": "#/components/schemas/KeeperHubKeyView"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Not enabled on this deployment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "put": {
+        "tags": [
+          "settings"
+        ],
+        "operationId": "put_keeperhub_key",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectKeeperHubRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Key stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/KeeperHubKeyView"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Empty or rejected key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "501": {
+            "description": "Not enabled on this deployment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "KeeperHub unreachable",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      },
+      "delete": {
+        "tags": [
+          "settings"
+        ],
+        "operationId": "delete_keeperhub_key",
+        "responses": {
+          "204": {
+            "description": "Key removed, or there was none"
+          },
+          "501": {
+            "description": "Not enabled on this deployment",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearer": []
+          }
+        ]
+      }
     }
   },
   "components": {
@@ -788,6 +919,18 @@
           },
           "token_symbol": {
             "type": "string"
+          }
+        }
+      },
+      "ConnectKeeperHubRequest": {
+        "type": "object",
+        "required": [
+          "api_key"
+        ],
+        "properties": {
+          "api_key": {
+            "type": "string",
+            "description": "The account's own KeeperHub API key. Validated against KeeperHub before\nit is stored, and encrypted at rest."
           }
         }
       },
@@ -1014,6 +1157,26 @@
           },
           "wallet_address": {
             "type": "string"
+          }
+        }
+      },
+      "KeeperHubKeyView": {
+        "type": "object",
+        "description": "What the settings panel is told. Deliberately has no field that could ever\nhold the key: the type itself is the guarantee it cannot be echoed back.",
+        "required": [
+          "masked"
+        ],
+        "properties": {
+          "masked": {
+            "type": "string",
+            "description": "`••••` and the last four characters, so a person can tell which key is\nconnected without the value being recoverable."
+          },
+          "wallet_address": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The wallet this key executes as — the only wallet Sever can revoke for\non this account (ADR-065)."
           }
         }
       },

@@ -89,6 +89,15 @@ pub struct AppConfig {
     /// forced off there rather than merely defaulted off, so no combination of
     /// environment variables can turn it back on.
     pub expose_verification_codes: bool,
+    /// Base64 32-byte key encrypting the per-user KeeperHub API keys at rest
+    /// (ADR-076). None disables the feature entirely: the settings routes
+    /// answer 501 and scans run on the worker's environment key, which is
+    /// strictly better than storing user credentials in the clear.
+    pub credential_encryption_key: Option<String>,
+    /// KeeperHub base URL, used to validate a key before storing it (ADR-076).
+    /// Same variable and default as the agent worker, so both bricks talk to
+    /// the same KeeperHub deployment.
+    pub keeperhub_api_url: String,
     /// Degraded-mode notices to log once tracing is up (dev fallbacks, ADR-013).
     pub warnings: Vec<&'static str>,
 }
@@ -152,6 +161,18 @@ impl AppConfig {
             );
         }
 
+        let credential_encryption_key = get("CREDENTIAL_ENCRYPTION_KEY");
+        // Not a production warning: ADR-076 is opt-in, and a deployment that
+        // never wanted per-user keys is correctly configured, not degraded.
+        // In development it is worth saying, because the settings panel
+        // answering 501 otherwise looks like a bug.
+        if credential_encryption_key.is_none() && !is_production {
+            warnings.push(
+                "CREDENTIAL_ENCRYPTION_KEY not set, accounts cannot connect their own KeeperHub \
+                 key: scans revoke with the worker's environment wallet only (ADR-076)",
+            );
+        }
+
         let internal_token = get("INTERNAL_API_TOKEN").unwrap_or_else(|| "change-me".into());
         // Weak-secret warning (ADR-055): a short HMAC/JWT key is brute-forceable.
         // A warning, not a hard fail, so it never breaks an existing deployment.
@@ -196,6 +217,9 @@ impl AppConfig {
                 10,
             )),
             expose_verification_codes,
+            credential_encryption_key,
+            keeperhub_api_url: get("KEEPERHUB_API_URL")
+                .unwrap_or_else(|| "https://app.keeperhub.com".into()),
             warnings,
         })
     }
@@ -233,6 +257,26 @@ mod tests {
         })
         .unwrap();
         assert!(!strong.warnings.iter().any(|w| w.contains("shorter than")));
+    }
+
+    #[test]
+    fn a_deployment_without_an_encryption_key_says_so_and_still_boots() {
+        // ADR-076: no key means the feature is off, not that startup fails —
+        // every deployment predating it must keep booting unchanged.
+        let off = AppConfig::from_lookup(lookup_from(&[])).unwrap();
+        assert_eq!(off.credential_encryption_key, None);
+        assert!(off
+            .warnings
+            .iter()
+            .any(|w| w.contains("CREDENTIAL_ENCRYPTION_KEY")));
+
+        let on =
+            AppConfig::from_lookup(lookup_from(&[("CREDENTIAL_ENCRYPTION_KEY", "a2V5")])).unwrap();
+        assert_eq!(on.credential_encryption_key.as_deref(), Some("a2V5"));
+        assert!(!on
+            .warnings
+            .iter()
+            .any(|w| w.contains("CREDENTIAL_ENCRYPTION_KEY")));
     }
 
     #[test]
@@ -285,7 +329,8 @@ mod tests {
         assert_eq!(config.rate_limits.api_per_minute, 120);
         assert_eq!(config.refresh_token_days, 30);
         assert_eq!(config.bind_addr, "0.0.0.0:8000");
-        assert_eq!(config.warnings.len(), 4); // jwt, agent url, database, mailer
+        // jwt, agent url, database, mailer, credential encryption key
+        assert_eq!(config.warnings.len(), 5);
         assert_eq!(config.email_verification_ttl_minutes, 10);
     }
 
@@ -389,6 +434,7 @@ mod tests {
             ("BIND_ADDR", "127.0.0.1:9000"),
             ("RESEND_API_KEY", "re_live_key"),
             ("EMAIL_VERIFICATION_TTL_MINUTES", "30"),
+            ("CREDENTIAL_ENCRYPTION_KEY", "a2V5"),
         ]))
         .unwrap();
 

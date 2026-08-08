@@ -53,6 +53,11 @@ class TaskRequest(BaseModel):
     # against seen_approval_keys (empty on the first run) and journals a report.
     recurring: bool = False
     seen_approval_keys: list[str] = []
+    # The scanning account's own KeeperHub key (ADR-076), so the revoker
+    # executes as *their* delegated wallet. Absent when the account has not
+    # connected one (and on pre-ADR-076 backends), which falls back to the
+    # worker's environment key.
+    keeperhub_api_key: str | None = None
 
 
 @app.get("/healthz")
@@ -80,6 +85,7 @@ def enqueue_task(
         clarification=body.clarification,
         recurring=body.recurring,
         seen_approval_keys=body.seen_approval_keys,
+        keeperhub_api_key=body.keeperhub_api_key,
     )
     response.headers["X-Request-Id"] = request_id
     logger.info(

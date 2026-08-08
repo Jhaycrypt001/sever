@@ -6,8 +6,9 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use super::{
-    AgentStep, ApprovalFinding, CodePurpose, EmailVerification, JobUsage, PasskeyCredential,
-    RecurringSearch, RefreshToken, ScanJob, SecurityEvent, User, WebauthnCeremony,
+    AgentStep, ApprovalFinding, CodePurpose, EmailVerification, JobUsage, KeeperHubCredential,
+    PasskeyCredential, RecurringSearch, RefreshToken, ScanJob, SecurityEvent, User,
+    WebauthnCeremony,
 };
 
 /// Infrastructure failure surfaced through a port (DB down, network error...).
@@ -101,6 +102,39 @@ pub trait PasskeyRepository: Send + Sync {
     async fn take_ceremony(&self, id: Uuid) -> Result<Option<WebauthnCeremony>, PortError>;
     /// Purges ceremonies abandoned before `cutoff` (called by the reaper).
     async fn delete_expired_ceremonies(&self, now: DateTime<Utc>) -> Result<u64, PortError>;
+}
+
+/// Stores each account's own KeeperHub API key (ADR-076).
+///
+/// The port traffics in already-sealed ciphertext: encryption happens in the
+/// use case, above this line, so no adapter — and no database — ever sees a
+/// plaintext key. `find` returning the sealed value keeps that true even for
+/// the caller that is about to use it; opening it is a separate, deliberate
+/// step.
+#[async_trait]
+pub trait KeeperHubCredentialRepository: Send + Sync {
+    /// Inserts, or replaces the account's existing key. Upsert rather than
+    /// insert because re-pasting a rotated key is the common case, and making
+    /// the user delete first would leave a window with no key at all.
+    async fn upsert(&self, credential: &KeeperHubCredential) -> Result<(), PortError>;
+    async fn find(&self, user_id: Uuid) -> Result<Option<KeeperHubCredential>, PortError>;
+    /// Returns whether a key was actually removed, so a disconnect on an
+    /// account with no key can answer honestly instead of claiming success.
+    async fn delete(&self, user_id: Uuid) -> Result<bool, PortError>;
+}
+
+/// Asks KeeperHub which wallet an API key executes as (ADR-076).
+///
+/// A port rather than a direct HTTP call so the save path can be unit-tested
+/// against a fake: the interesting cases here are a rejected key and an
+/// unreachable KeeperHub, and neither should require the network to exercise.
+#[async_trait]
+pub trait KeeperHubDirectory: Send + Sync {
+    /// `Ok(Some(wallet))` when the key is valid, `Ok(None)` when KeeperHub
+    /// rejects it, `Err` when KeeperHub could not be reached. The three are
+    /// distinct because they mean different things to the user: fix the key,
+    /// versus try again later.
+    async fn wallet_for_key(&self, api_key: &str) -> Result<Option<String>, PortError>;
 }
 
 /// Delivers transactional email (ADR-062).
@@ -213,13 +247,25 @@ pub trait SecurityAudit: Send + Sync {
     async fn delete_before(&self, cutoff: DateTime<Utc>) -> Result<u64, PortError>;
 }
 
+/// What a dispatch carries besides the job itself.
+///
+/// A struct rather than positional arguments because the two fields are
+/// otherwise a `&[String]` and an `Option<&str>` side by side: easy to
+/// transpose at a call site, and one of them is a credential.
+#[derive(Default)]
+pub struct DispatchContext<'a> {
+    /// Recurring-scan memory (ADR-033): approval keys (chain:token:spender)
+    /// delivered by previous runs, empty for one-shot scans.
+    pub seen_approval_keys: &'a [String],
+    /// The job owner's own KeeperHub key (ADR-076), when they have connected
+    /// one. `None` leaves the worker on its environment key.
+    pub keeperhub_api_key: Option<&'a str>,
+}
+
 /// Sends a scan job to the agent (via the FastAPI micro-API, see ADR-005).
-/// `seen_approval_keys` is the recurring-scan memory (ADR-033): approval keys
-/// (chain:token:spender) delivered by previous runs, empty for one-shot scans.
 #[async_trait]
 pub trait JobDispatcher: Send + Sync {
-    async fn dispatch(&self, job: &ScanJob, seen_approval_keys: &[String])
-        -> Result<(), PortError>;
+    async fn dispatch(&self, job: &ScanJob, context: DispatchContext<'_>) -> Result<(), PortError>;
 }
 
 /// A digest of a recurring run that found something new (ADR-036/058).

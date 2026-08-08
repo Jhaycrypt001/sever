@@ -8,8 +8,12 @@ use std::sync::Arc;
 
 use chrono::Utc;
 
-use crate::domain::ports::{JobDispatcher, JobRepository, PortError, RecurringSearchRepository};
+use crate::domain::ports::{
+    DispatchContext, JobDispatcher, JobRepository, PortError, RecurringSearchRepository,
+};
 use crate::domain::ScanJob;
+
+use super::KeeperHubKeys;
 
 /// Bound on the memory sent to the agent (task payload size).
 const SEEN_APPROVAL_KEYS_LIMIT: u32 = 200;
@@ -19,6 +23,10 @@ pub struct RunDueSearches {
     jobs: Arc<dyn JobRepository>,
     dispatcher: Arc<dyn JobDispatcher>,
     daily_quota: u32,
+    /// Per-user KeeperHub keys (ADR-076). This is the path where they matter
+    /// most: an unattended run is the one that can revoke a dangerous approval
+    /// before the owner has even seen it.
+    keeperhub_keys: Option<Arc<KeeperHubKeys>>,
 }
 
 impl RunDueSearches {
@@ -33,7 +41,15 @@ impl RunDueSearches {
             jobs,
             dispatcher,
             daily_quota,
+            keeperhub_keys: None,
         }
+    }
+
+    /// Runs scheduled scans with each owner's own KeeperHub key (ADR-076).
+    #[must_use]
+    pub fn with_keeperhub_keys(mut self, keys: Option<Arc<KeeperHubKeys>>) -> Self {
+        self.keeperhub_keys = keys;
+        self
     }
 
     /// Launches every due recurring scan; returns how many jobs started.
@@ -66,7 +82,13 @@ impl RunDueSearches {
                 .with_mode(search.mode)
                 .with_recurring(search.id);
             self.jobs.insert(&job).await?;
-            if let Err(err) = self.dispatcher.dispatch(&job, &seen_approval_keys).await {
+            let api_key =
+                KeeperHubKeys::dispatch_key(self.keeperhub_keys.as_ref(), search.user_id).await;
+            let context = DispatchContext {
+                seen_approval_keys: &seen_approval_keys,
+                keeperhub_api_key: api_key.as_deref(),
+            };
+            if let Err(err) = self.dispatcher.dispatch(&job, context).await {
                 tracing::error!(job_id = %job.id, error = %err, "recurring dispatch failed");
                 job.fail(format!("dispatch failed: {err}"));
                 self.jobs.update(&job).await?;
@@ -102,11 +124,15 @@ mod tests {
 
     #[async_trait]
     impl JobDispatcher for RecordingDispatcher {
-        async fn dispatch(&self, job: &ScanJob, seen: &[String]) -> Result<(), PortError> {
+        async fn dispatch(
+            &self,
+            job: &ScanJob,
+            context: DispatchContext<'_>,
+        ) -> Result<(), PortError> {
             self.dispatched
                 .lock()
                 .unwrap()
-                .push((job.id, seen.to_vec()));
+                .push((job.id, context.seen_approval_keys.to_vec()));
             Ok(())
         }
     }
@@ -213,7 +239,7 @@ mod tests {
         struct FailingDispatcher;
         #[async_trait]
         impl JobDispatcher for FailingDispatcher {
-            async fn dispatch(&self, _: &ScanJob, _: &[String]) -> Result<(), PortError> {
+            async fn dispatch(&self, _: &ScanJob, _: DispatchContext<'_>) -> Result<(), PortError> {
                 Err(PortError("agent unreachable".into()))
             }
         }

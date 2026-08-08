@@ -3,8 +3,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::domain::job::JobError;
-use crate::domain::ports::{JobDispatcher, JobRepository, PortError};
+use crate::domain::ports::{DispatchContext, JobDispatcher, JobRepository, PortError};
 use crate::domain::{JobMode, ScanJob};
+
+use super::KeeperHubKeys;
 
 #[derive(Debug, thiserror::Error)]
 pub enum LaunchError {
@@ -25,6 +27,9 @@ pub struct LaunchSearch {
     /// Anthropic API calls (and, in agent mode, KeeperHub gas), so this caps
     /// the spend a single account can cause (ADR-017).
     daily_quota: u32,
+    /// Per-user KeeperHub keys (ADR-076). `None` on deployments without an
+    /// encryption key: scans still run, on the worker's environment key.
+    keeperhub_keys: Option<Arc<KeeperHubKeys>>,
 }
 
 impl LaunchSearch {
@@ -37,7 +42,15 @@ impl LaunchSearch {
             jobs,
             dispatcher,
             daily_quota,
+            keeperhub_keys: None,
         }
+    }
+
+    /// Dispatches with the scanning account's own KeeperHub key (ADR-076).
+    #[must_use]
+    pub fn with_keeperhub_keys(mut self, keys: Option<Arc<KeeperHubKeys>>) -> Self {
+        self.keeperhub_keys = keys;
+        self
     }
 
     /// Checks the quota, persists the job (status `pending`), then hands it to
@@ -58,7 +71,12 @@ impl LaunchSearch {
         let mut job = ScanJob::new(user_id, wallet_address)?.with_mode(mode);
         self.jobs.insert(&job).await?;
 
-        if let Err(err) = self.dispatcher.dispatch(&job, &[]).await {
+        let api_key = KeeperHubKeys::dispatch_key(self.keeperhub_keys.as_ref(), user_id).await;
+        let context = DispatchContext {
+            seen_approval_keys: &[],
+            keeperhub_api_key: api_key.as_deref(),
+        };
+        if let Err(err) = self.dispatcher.dispatch(&job, context).await {
             job.fail(format!("dispatch failed: {err}"));
             self.jobs.update(&job).await?;
             return Err(LaunchError::DispatchFailed);
@@ -79,8 +97,20 @@ mod tests {
     const ADDR: &str = "0x1234567890123456789012345678901234567890";
 
     struct RecordingDispatcher {
-        dispatched: Mutex<Vec<Uuid>>,
+        /// Job id and the KeeperHub key it was dispatched with (ADR-076).
+        dispatched: Mutex<Vec<(Uuid, Option<String>)>>,
         fail: bool,
+    }
+
+    impl RecordingDispatcher {
+        fn job_ids(&self) -> Vec<Uuid> {
+            self.dispatched
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(id, _)| *id)
+                .collect()
+        }
     }
 
     impl RecordingDispatcher {
@@ -100,11 +130,18 @@ mod tests {
 
     #[async_trait]
     impl JobDispatcher for RecordingDispatcher {
-        async fn dispatch(&self, job: &ScanJob, _seen: &[String]) -> Result<(), PortError> {
+        async fn dispatch(
+            &self,
+            job: &ScanJob,
+            context: DispatchContext<'_>,
+        ) -> Result<(), PortError> {
             if self.fail {
                 return Err(PortError("agent unreachable".into()));
             }
-            self.dispatched.lock().unwrap().push(job.id);
+            self.dispatched
+                .lock()
+                .unwrap()
+                .push((job.id, context.keeperhub_api_key.map(str::to_string)));
             Ok(())
         }
     }
@@ -121,7 +158,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(job.status, JobStatus::Pending);
-        assert_eq!(*dispatcher.dispatched.lock().unwrap(), vec![job.id]);
+        assert_eq!(dispatcher.job_ids(), vec![job.id]);
         assert_eq!(jobs.find(job.id).await.unwrap(), Some(job));
     }
 

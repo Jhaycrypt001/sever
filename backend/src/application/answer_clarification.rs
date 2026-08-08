@@ -7,8 +7,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::domain::job::JobError;
-use crate::domain::ports::{JobDispatcher, JobRepository, PortError};
+use crate::domain::ports::{DispatchContext, JobDispatcher, JobRepository, PortError};
 use crate::domain::ScanJob;
+
+use super::KeeperHubKeys;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AnswerError {
@@ -25,11 +27,24 @@ pub enum AnswerError {
 pub struct AnswerClarification {
     jobs: Arc<dyn JobRepository>,
     dispatcher: Arc<dyn JobDispatcher>,
+    /// Per-user KeeperHub keys (ADR-076); see `LaunchSearch`.
+    keeperhub_keys: Option<Arc<KeeperHubKeys>>,
 }
 
 impl AnswerClarification {
     pub fn new(jobs: Arc<dyn JobRepository>, dispatcher: Arc<dyn JobDispatcher>) -> Self {
-        Self { jobs, dispatcher }
+        Self {
+            jobs,
+            dispatcher,
+            keeperhub_keys: None,
+        }
+    }
+
+    /// Resumes with the account's own KeeperHub key (ADR-076).
+    #[must_use]
+    pub fn with_keeperhub_keys(mut self, keys: Option<Arc<KeeperHubKeys>>) -> Self {
+        self.keeperhub_keys = keys;
+        self
     }
 
     /// Stores the answer, clears the previous journal (the resumed loop starts
@@ -60,7 +75,12 @@ impl AnswerClarification {
             }
             None => Vec::new(),
         };
-        if let Err(err) = self.dispatcher.dispatch(&job, &seen_approval_keys).await {
+        let api_key = KeeperHubKeys::dispatch_key(self.keeperhub_keys.as_ref(), user_id).await;
+        let context = DispatchContext {
+            seen_approval_keys: &seen_approval_keys,
+            keeperhub_api_key: api_key.as_deref(),
+        };
+        if let Err(err) = self.dispatcher.dispatch(&job, context).await {
             job.fail(format!("dispatch failed: {err}"));
             self.jobs.update(&job).await?;
             return Err(AnswerError::DispatchFailed);
@@ -96,7 +116,11 @@ mod tests {
 
     #[async_trait]
     impl JobDispatcher for RecordingDispatcher {
-        async fn dispatch(&self, job: &ScanJob, _seen: &[String]) -> Result<(), PortError> {
+        async fn dispatch(
+            &self,
+            job: &ScanJob,
+            _context: DispatchContext<'_>,
+        ) -> Result<(), PortError> {
             if self.fail {
                 return Err(PortError("agent unreachable".into()));
             }

@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::application::answer_clarification::AnswerError;
 use crate::application::ingest_results::IngestError;
+use crate::application::keeperhub_key::KeeperHubKeyError;
 use crate::application::launch_search::LaunchError;
 use crate::application::login_user::LoginError;
 use crate::application::password_reset::{RequestResetError, ResetPasswordError};
@@ -31,18 +32,18 @@ use crate::application::refresh_session::RefreshError;
 use crate::application::register_user::RegisterError;
 use crate::application::verify_email::{ConfirmVerificationError, RequestVerificationError};
 use crate::application::{
-    AnswerClarification, ConfirmEmailVerification, IngestResults, LaunchSearch, LoginUser,
-    RecurringSearches, RefreshSession, RegisterUser, RequestEmailVerification,
+    AnswerClarification, ConfirmEmailVerification, IngestResults, KeeperHubKeys, LaunchSearch,
+    LoginUser, RecurringSearches, RefreshSession, RegisterUser, RequestEmailVerification,
     RequestPasswordReset, ResetPassword, SearchQueries, SessionIssuer, SessionTokens,
 };
 use crate::domain::ports::{
     DigestSender, EmailSender, EmailVerificationRepository, JobDispatcher, JobRepository,
-    PasswordHasher, RecurringSearchRepository, RefreshTokenRepository, SecurityAudit, TokenService,
-    UserRepository,
+    KeeperHubCredentialRepository, KeeperHubDirectory, PasswordHasher, RecurringSearchRepository,
+    RefreshTokenRepository, SecurityAudit, TokenService, UserRepository,
 };
 use crate::domain::{
     AgentStep, ApprovalFinding, JobMode, JobStatus, JobUsage, RecurringSearch, RevocationStatus,
-    RiskTier, ScanJob, SecurityEvent, SecurityEventKind,
+    RiskTier, ScanJob, SecretBox, SecurityEvent, SecurityEventKind,
 };
 
 /// Name of the HttpOnly cookie carrying the refresh token (ADR-008).
@@ -80,6 +81,15 @@ pub struct AppState {
     login_throttle: rate_limit::Limiter,
     internal_token: String,
     refresh_ttl_days: i64,
+    /// Per-user KeeperHub keys (ADR-076). `None` when the deployment has no
+    /// `CREDENTIAL_ENCRYPTION_KEY` — the feature is then simply absent rather
+    /// than storing keys unencrypted.
+    keeperhub_keys: Option<Arc<KeeperHubKeys>>,
+    /// Ingredients of the two dispatching use cases, kept so enabling ADR-076
+    /// can rebuild them with the key store attached. Cheap `Arc` clones —
+    /// the alternative is an `Option` inside the use cases mutated after
+    /// construction, which is harder to reason about than rebuilding.
+    dispatch_parts: (Arc<dyn JobRepository>, Arc<dyn JobDispatcher>, u32),
 }
 
 /// HTTP throttling knobs (ADR-017). Internal routes are never rate limited.
@@ -123,6 +133,19 @@ pub struct EmailVerificationSetup {
     /// different secrets, and sharing one meant a person fumbling their code
     /// spent the attempts they would need to sign in afterwards.
     pub throttle: rate_limit::Limiter,
+}
+
+/// Everything per-user KeeperHub keys need (ADR-076).
+///
+/// Optional as a whole: without `CREDENTIAL_ENCRYPTION_KEY` there is nowhere
+/// safe to put a key, so the feature is off and its routes answer 501 rather
+/// than storing anything in the clear. Grouped for the same reason as
+/// [`EmailVerificationSetup`] — three more positional arguments on a wiring
+/// point that already carries fourteen.
+pub struct KeeperHubSetup {
+    pub credentials: Arc<dyn KeeperHubCredentialRepository>,
+    pub directory: Arc<dyn KeeperHubDirectory>,
+    pub secrets: SecretBox,
 }
 
 impl AppState {
@@ -190,7 +213,8 @@ impl AppState {
                 dispatcher.clone(),
                 daily_search_quota,
             )),
-            answer: Arc::new(AnswerClarification::new(jobs.clone(), dispatcher)),
+            answer: Arc::new(AnswerClarification::new(jobs.clone(), dispatcher.clone())),
+            dispatch_parts: (jobs.clone(), dispatcher, daily_search_quota),
             recurring: Arc::new(RecurringSearches::new(recurring.clone())),
             ingest: Arc::new(IngestResults::new(jobs.clone(), recurring, digests)),
             queries: Arc::new(SearchQueries::new(jobs)),
@@ -199,7 +223,41 @@ impl AppState {
             login_throttle,
             internal_token,
             refresh_ttl_days,
+            keeperhub_keys: None,
         }
+    }
+
+    /// Enables per-user KeeperHub keys (ADR-076). Without this the settings
+    /// routes answer 501 and every scan uses the worker's environment key.
+    #[must_use]
+    pub fn with_keeperhub_keys(self, setup: KeeperHubSetup) -> Self {
+        let keys = Arc::new(KeeperHubKeys::new(
+            setup.credentials,
+            setup.directory,
+            self.audit.clone(),
+            setup.secrets,
+        ));
+        self.with_shared_keeperhub_keys(Some(keys))
+    }
+
+    /// Same, from an already-built store, so `main` can hand the *same*
+    /// instance to the background scheduler (ADR-033). `None` leaves the
+    /// feature off: the settings routes answer 501 and scans fall back to the
+    /// worker's environment key.
+    #[must_use]
+    pub fn with_shared_keeperhub_keys(mut self, keys: Option<Arc<KeeperHubKeys>>) -> Self {
+        let (jobs, dispatcher, quota) = self.dispatch_parts.clone();
+        // Rebuilt, not mutated: both dispatch paths must carry the owner's key
+        // or a connected account silently keeps revoking as the environment
+        // wallet — the exact failure ADR-076 exists to remove.
+        self.launch = Arc::new(
+            LaunchSearch::new(jobs.clone(), dispatcher.clone(), quota)
+                .with_keeperhub_keys(keys.clone()),
+        );
+        self.answer =
+            Arc::new(AnswerClarification::new(jobs, dispatcher).with_keeperhub_keys(keys.clone()));
+        self.keeperhub_keys = keys;
+        self
     }
 
     /// The verification code, but only where showing it is allowed.
@@ -316,6 +374,9 @@ impl utoipa::Modify for SecurityAddon {
         create_recurring,
         list_recurring,
         delete_recurring,
+        get_keeperhub_key,
+        put_keeperhub_key,
+        delete_keeperhub_key,
     ),
     components(schemas(
         CredentialsRequest,
@@ -327,6 +388,8 @@ impl utoipa::Modify for SecurityAddon {
         CreateSearchRequest,
         CreateRecurringRequest,
         AnswerRequest,
+        ConnectKeeperHubRequest,
+        KeeperHubKeyView,
         JobView,
         JobDetailView,
         RecurringView,
@@ -381,6 +444,12 @@ pub fn router_with_limits(state: AppState, limits: RateLimitConfig) -> Router {
         .route(
             "/api/recurring/{id}",
             axum::routing::delete(delete_recurring),
+        )
+        .route(
+            "/api/settings/keeperhub-key",
+            get(get_keeperhub_key)
+                .put(put_keeperhub_key)
+                .delete(delete_keeperhub_key),
         )
         .layer(axum::middleware::from_fn_with_state(
             api_limiter,
@@ -1076,6 +1145,126 @@ async fn list_searches(State(state): State<AppState>, AuthUser(user_id): AuthUse
     }
 }
 
+// ------------------------------------------- per-user KeeperHub key (ADR-076)
+
+#[derive(Deserialize, ToSchema)]
+struct ConnectKeeperHubRequest {
+    /// The account's own KeeperHub API key. Validated against KeeperHub before
+    /// it is stored, and encrypted at rest.
+    api_key: String,
+}
+
+/// What the settings panel is told. Deliberately has no field that could ever
+/// hold the key: the type itself is the guarantee it cannot be echoed back.
+#[derive(Serialize, ToSchema)]
+struct KeeperHubKeyView {
+    /// The wallet this key executes as — the only wallet Sever can revoke for
+    /// on this account (ADR-065).
+    wallet_address: Option<String>,
+    /// `••••` and the last four characters, so a person can tell which key is
+    /// connected without the value being recoverable.
+    masked: String,
+}
+
+impl From<crate::application::ConnectedKey> for KeeperHubKeyView {
+    fn from(key: crate::application::ConnectedKey) -> Self {
+        Self {
+            wallet_address: key.wallet_address,
+            masked: key.masked,
+        }
+    }
+}
+
+/// The response for a deployment with no encryption key: the feature is
+/// absent, not broken, so 501 rather than a 4xx blaming the caller.
+fn keeperhub_not_enabled() -> Response {
+    error_body(
+        StatusCode::NOT_IMPLEMENTED,
+        "per-user KeeperHub keys are not enabled on this deployment",
+    )
+}
+
+#[utoipa::path(get, path = "/api/settings/keeperhub-key", tag = "settings",
+    security(("bearer" = [])),
+    responses(
+        (status = 200, description = "The connected key, or null", body = Option<KeeperHubKeyView>),
+        (status = 501, description = "Not enabled on this deployment", body = ErrorResponse)))]
+async fn get_keeperhub_key(State(state): State<AppState>, AuthUser(user_id): AuthUser) -> Response {
+    let Some(keys) = state.keeperhub_keys.clone() else {
+        return keeperhub_not_enabled();
+    };
+    match keys.status(user_id).await {
+        Ok(status) => Json(status.map(KeeperHubKeyView::from)).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "reading the KeeperHub key failed");
+            error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+#[utoipa::path(put, path = "/api/settings/keeperhub-key", tag = "settings",
+    security(("bearer" = [])),
+    request_body = ConnectKeeperHubRequest,
+    responses(
+        (status = 200, description = "Key stored", body = KeeperHubKeyView),
+        (status = 422, description = "Empty or rejected key", body = ErrorResponse),
+        (status = 502, description = "KeeperHub unreachable", body = ErrorResponse),
+        (status = 501, description = "Not enabled on this deployment", body = ErrorResponse)))]
+async fn put_keeperhub_key(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+    Json(body): Json<ConnectKeeperHubRequest>,
+) -> Response {
+    let Some(keys) = state.keeperhub_keys.clone() else {
+        return keeperhub_not_enabled();
+    };
+    match keys.connect(user_id, &body.api_key).await {
+        Ok(connected) => Json(KeeperHubKeyView::from(connected)).into_response(),
+        Err(KeeperHubKeyError::Empty) => {
+            error_body(StatusCode::UNPROCESSABLE_ENTITY, "the API key is empty")
+        }
+        Err(KeeperHubKeyError::Rejected) => error_body(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "KeeperHub does not recognise this API key",
+        ),
+        // 502, not 422: nothing is wrong with what the user typed, so the
+        // message must not send them off to re-check a key that may be fine.
+        Err(KeeperHubKeyError::DirectoryUnreachable) => error_body(
+            StatusCode::BAD_GATEWAY,
+            "KeeperHub could not be reached to verify the key - try again shortly",
+        ),
+        Err(e) => {
+            // Logged without the key: `KeeperHubKeyError` carries none, and
+            // nothing here interpolates the request body.
+            tracing::error!(error = %e, "storing the KeeperHub key failed");
+            error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
+#[utoipa::path(delete, path = "/api/settings/keeperhub-key", tag = "settings",
+    security(("bearer" = [])),
+    responses(
+        (status = 204, description = "Key removed, or there was none"),
+        (status = 501, description = "Not enabled on this deployment", body = ErrorResponse)))]
+async fn delete_keeperhub_key(
+    State(state): State<AppState>,
+    AuthUser(user_id): AuthUser,
+) -> Response {
+    let Some(keys) = state.keeperhub_keys.clone() else {
+        return keeperhub_not_enabled();
+    };
+    match keys.disconnect(user_id).await {
+        // 204 whether or not there was a key: the caller asked for the account
+        // to end up with none, and it does.
+        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "removing the KeeperHub key failed");
+            error_body(StatusCode::INTERNAL_SERVER_ERROR, "internal error")
+        }
+    }
+}
+
 // ---------------------------------------------------------------- recurring searches (ADR-033)
 
 #[utoipa::path(post, path = "/api/recurring", tag = "recurring",
@@ -1225,6 +1414,13 @@ pub fn job_detail_json(
 /// by the contract test (ADR-049).
 pub fn recurring_search_json(search: &RecurringSearch) -> serde_json::Value {
     serde_json::to_value(RecurringView::from(search)).expect("serializable recurring view")
+}
+
+/// The connected-key payload served by the `/api/settings/keeperhub-key`
+/// routes (ADR-076), pinned by the contract test (ADR-049) so a field that
+/// could carry the key cannot be added without the test noticing.
+pub fn keeperhub_key_json(key: crate::application::ConnectedKey) -> serde_json::Value {
+    serde_json::to_value(KeeperHubKeyView::from(key)).expect("serializable keeperhub key view")
 }
 
 #[utoipa::path(get, path = "/api/searches/{id}", tag = "searches",

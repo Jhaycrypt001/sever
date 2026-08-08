@@ -119,9 +119,19 @@ def build_policy(settings: Settings, meter: UsageMeter | None = None) -> AgentPo
     )
 
 
-def build_revoker(settings: Settings, meter: UsageMeter | None = None) -> ApprovalRevoker:
+def build_revoker(
+    settings: Settings,
+    meter: UsageMeter | None = None,
+    api_key: str | None = None,
+) -> ApprovalRevoker:
     """Selects the onchain executor (ADR-058): KeeperHub live, or a fake that
-    always "succeeds" with a synthetic tx hash for the keyless demo/e2e."""
+    always "succeeds" with a synthetic tx hash for the keyless demo/e2e.
+
+    `api_key` is the scanning account's own KeeperHub key (ADR-076). KeeperHub
+    executes as the one wallet delegated to that key (ADR-065), so using the
+    owner's key is what makes a revocation possible for anyone other than the
+    deployment's own wallet. Absent or blank falls back to the environment key.
+    """
     if settings.providers == "fake":
         from aiagent.adapters.fake import FakeApprovalRevoker
 
@@ -131,7 +141,7 @@ def build_revoker(settings: Settings, meter: UsageMeter | None = None) -> Approv
 
     return KeeperHubApprovalRevoker(
         settings.keeperhub_api_url,
-        settings.keeperhub_api_key,
+        (api_key or "").strip() or settings.keeperhub_api_key,
         meter=meter,
         simulate_only=settings.keeperhub_simulate_only,
     )
@@ -220,6 +230,7 @@ def run_scan_task(
     clarification: str | None = None,
     recurring: bool = False,
     seen_approval_keys: list[str] | None = None,
+    keeperhub_api_key: str | None = None,
 ) -> int:
     settings = Settings.from_env()
     request_id = request_id or job_id
@@ -243,7 +254,9 @@ def run_scan_task(
     try:
         source, threat_intel = build_providers(settings, meter)
         policy = build_policy(settings, meter) if mode == "agent" else None
-        revoker = build_revoker(settings, meter) if mode == "agent" else None
+        revoker = (
+            build_revoker(settings, meter, api_key=keeperhub_api_key) if mode == "agent" else None
+        )
     except Exception as exc:
         # Misconfiguration (missing API key...) must surface to the user as a failed job.
         logger.error("agent misconfigured", extra=log_ctx, exc_info=True)
