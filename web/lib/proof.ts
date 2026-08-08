@@ -45,9 +45,23 @@ export const SEPOLIA_TX_URL = `https://sepolia.etherscan.io/tx/${SEPOLIA_TX_HASH
 /** The KeeperHub-provisioned wallet the revocations executed as. */
 export const EXECUTOR_WALLET = '0xe13ed979bc6b23d6d9608939051e9488e9f304bf'
 
-/** Measured from the Sepolia execution's status payload. */
+/**
+ * The Sepolia execution, and only that one — every display of `GAS_USED` sits
+ * next to `SEPOLIA_TX_HASH`. Re-read from the receipt on 2026-08-08:
+ * gasUsed 0x125f7 = 75,255. The Base transaction above is a different, cheaper
+ * execution (0xb3e2 = 46,050, below), so the two numbers disagreeing is
+ * expected rather than a drift to reconcile.
+ */
 export const GAS_USED = '75,255'
 export const EXECUTION_MS = '7,906'
+
+/**
+ * The Base mainnet execution's gas, read from the receipt on 2026-08-08
+ * (gasUsed 0xb3e2). Both transactions are the same operation through the same
+ * relayer — an `approve(spender, 0)` wrapped in the same `9aefaff8` call — so
+ * the gap is the chain's own execution cost, not a difference in what was done.
+ */
+export const MAINNET_GAS_USED = '46,050'
 
 /**
  * Chains the scanner actually covers.
@@ -66,16 +80,22 @@ export const SUPPORTED_CHAINS = [
 
 export const CHAIN_COUNT = SUPPORTED_CHAINS.length
 
-/** Counted on 2026-08-06. Update these with the numbers, never by feel. */
+/**
+ * Counted on 2026-08-08 from the suites themselves, never by feel.
+ *
+ * `python` is pytest's collected total (245 passing plus 4 skipped that need
+ * live credentials); `rust` is every `cargo test` binary except the Postgres
+ * one, which is counted separately because it needs the compose service.
+ */
 export const TEST_COUNTS = {
-  python: 239,
-  rust: 201,
+  python: 249,
+  rust: 229,
   postgres: 20,
-  browser: 22,
+  browser: 25,
 } as const
 
-export const ADR_COUNT = 74
-export const MIGRATION_RANGE = '0001 – 0015'
+export const ADR_COUNT = 76
+export const MIGRATION_RANGE = '0001 – 0016'
 
 export const REPO_URL = 'https://github.com/Jhaycrypt001/sever'
 
