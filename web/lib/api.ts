@@ -93,6 +93,20 @@ export const scanJobSchema = z.object({
 export type ScanJob = z.infer<typeof scanJobSchema>
 
 // A saved scan re-run on an interval by the backend scheduler (ADR-033).
+/**
+ * A connected KeeperHub key as the console is allowed to see it (ADR-076).
+ *
+ * There is no field for the key: the backend's response type has none either,
+ * so a key cannot be echoed back by any route. `wallet_address` is the one
+ * wallet this account can revoke for (ADR-065), and `masked` only identifies
+ * *which* key is connected.
+ */
+export const keeperHubKeySchema = z.object({
+  wallet_address: z.string().nullable(),
+  masked: z.string(),
+})
+export type KeeperHubKey = z.infer<typeof keeperHubKeySchema>
+
 export const recurringScanSchema = z.object({
   id: z.string(),
   wallet_address: z.string(),
@@ -376,4 +390,29 @@ export const api = {
 
   deleteRecurring: (id: string, token: string) =>
     request<void>(`/api/recurring/${id}`, { method: 'DELETE' }, token),
+
+  // Per-user KeeperHub keys (ADR-076). The key itself is write-only: it goes
+  // up on connect and never comes back down, so nothing here can render it.
+  // `null` means no key connected; a 501 means the deployment has the feature
+  // off, which callers distinguish by `ApiError.status`.
+  getKeeperHubKey: async (token: string) =>
+    keeperHubKeySchema
+      .nullable()
+      .parse(await request<unknown>('/api/settings/keeperhub-key', {}, token)),
+
+  connectKeeperHubKey: async (apiKey: string, token: string) =>
+    keeperHubKeySchema.parse(
+      await request<unknown>(
+        '/api/settings/keeperhub-key',
+        { method: 'PUT', body: JSON.stringify({ api_key: apiKey }) },
+        token,
+      ),
+    ),
+
+  disconnectKeeperHubKey: (token: string) =>
+    request<void>(
+      '/api/settings/keeperhub-key',
+      { method: 'DELETE' },
+      token,
+    ),
 }

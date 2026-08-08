@@ -1,6 +1,7 @@
 """Fake providers and provider selection (ADR-021/058)."""
 
 import re
+from dataclasses import replace
 
 from aiagent.adapters.fake import (
     ASK_SENTINEL,
@@ -87,6 +88,38 @@ def test_build_revoker_selects_keeperhub_live() -> None:
 
     revoker: ApprovalRevoker = build_revoker(settings_with("live"))
     assert isinstance(revoker, KeeperHubApprovalRevoker)
+
+
+def test_build_revoker_prefers_the_jobs_own_key() -> None:
+    """ADR-076: the scanning account's key executes as *their* delegated
+    wallet. Without this the worker always executes as its environment
+    wallet, and KeeperHub refuses every revocation for anyone else."""
+    settings = settings_with("live")
+    assert settings.keeperhub_api_key == ""
+
+    revoker = build_revoker(settings, api_key="kh_owner")
+
+    assert revoker._api_key == "kh_owner"  # noqa: SLF001 - asserting the wiring
+
+
+def test_build_revoker_falls_back_to_the_environment_key() -> None:
+    """Accounts that have not connected a key (and pre-ADR-076 backends,
+    which send no key at all) keep the previous behaviour."""
+    settings = replace(settings_with("live"), keeperhub_api_key="kh_env")
+
+    revoker = build_revoker(settings, api_key=None)
+
+    assert revoker._api_key == "kh_env"  # noqa: SLF001 - asserting the wiring
+
+
+def test_build_revoker_ignores_a_blank_job_key() -> None:
+    """An empty string is absence, not a key: it must not shadow the
+    environment fallback and send KeeperHub an unauthenticated request."""
+    settings = replace(settings_with("live"), keeperhub_api_key="kh_env")
+
+    revoker = build_revoker(settings, api_key="   ")
+
+    assert revoker._api_key == "kh_env"  # noqa: SLF001 - asserting the wiring
 
 
 def test_fake_run_exercises_the_full_risk_cascade() -> None:

@@ -6,12 +6,12 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::domain::ports::{
-    EmailVerificationRepository, JobRepository, PortError, RecurringSearchRepository,
-    RefreshTokenRepository, SecurityAudit, UserRepository,
+    EmailVerificationRepository, JobRepository, KeeperHubCredentialRepository, PortError,
+    RecurringSearchRepository, RefreshTokenRepository, SecurityAudit, UserRepository,
 };
 use crate::domain::{
     AgentStep, ApprovalFinding, CodePurpose, EmailVerification, JobStatus, JobUsage,
-    RecurringSearch, RefreshToken, ScanJob, SecurityEvent, User,
+    KeeperHubCredential, RecurringSearch, RefreshToken, ScanJob, SecurityEvent, User,
 };
 
 #[derive(Default)]
@@ -198,6 +198,38 @@ impl RefreshTokenRepository for InMemoryRefreshTokenRepository {
         let before = tokens.len();
         tokens.retain(|_, t| !t.is_expired(now));
         Ok((before - tokens.len()) as u64)
+    }
+}
+
+#[derive(Default)]
+pub struct InMemoryKeeperHubCredentialRepository {
+    credentials: Mutex<HashMap<Uuid, KeeperHubCredential>>,
+}
+
+impl InMemoryKeeperHubCredentialRepository {
+    /// Any stored credential, for tests that assert on what reached storage
+    /// without having the user id to hand (the HTTP tests only hold a token).
+    pub fn find_any(&self) -> Option<KeeperHubCredential> {
+        self.credentials.lock().unwrap().values().next().cloned()
+    }
+}
+
+#[async_trait]
+impl KeeperHubCredentialRepository for InMemoryKeeperHubCredentialRepository {
+    async fn upsert(&self, credential: &KeeperHubCredential) -> Result<(), PortError> {
+        self.credentials
+            .lock()
+            .unwrap()
+            .insert(credential.user_id, credential.clone());
+        Ok(())
+    }
+
+    async fn find(&self, user_id: Uuid) -> Result<Option<KeeperHubCredential>, PortError> {
+        Ok(self.credentials.lock().unwrap().get(&user_id).cloned())
+    }
+
+    async fn delete(&self, user_id: Uuid) -> Result<bool, PortError> {
+        Ok(self.credentials.lock().unwrap().remove(&user_id).is_some())
     }
 }
 

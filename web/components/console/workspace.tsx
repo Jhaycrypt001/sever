@@ -14,6 +14,7 @@ import {
 import { chainName, truncateAddress } from '@/lib/chains'
 import { cn } from '@/lib/utils'
 import { FindingsTable } from './findings-table'
+import { KeeperHubKeyPanel } from './keeperhub-key'
 import { Journal } from './journal'
 import { JobStatusBadge } from './status'
 
@@ -163,6 +164,7 @@ export function Workspace({
             selectedId={selectedId}
             onSelect={setSelectedId}
           />
+          <KeeperHubKeyPanel call={call} />
           <RecurringList
             call={call}
             recurring={recurring}

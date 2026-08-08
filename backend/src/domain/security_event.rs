@@ -20,6 +20,11 @@ pub enum SecurityEventKind {
     RefreshReuseDetected,
     /// A user hit the daily search quota (ADR-017).
     QuotaExceeded,
+    /// An account connected its own KeeperHub API key (ADR-076) — the moment it
+    /// gained the ability to have transactions sent on its behalf.
+    KeeperHubKeyConnected,
+    /// An account removed its KeeperHub API key (ADR-076).
+    KeeperHubKeyDisconnected,
 }
 
 impl SecurityEventKind {
@@ -29,6 +34,8 @@ impl SecurityEventKind {
             Self::LoginThrottled => "login_throttled",
             Self::RefreshReuseDetected => "refresh_reuse_detected",
             Self::QuotaExceeded => "quota_exceeded",
+            Self::KeeperHubKeyConnected => "keeperhub_key_connected",
+            Self::KeeperHubKeyDisconnected => "keeperhub_key_disconnected",
         }
     }
 }

@@ -112,7 +112,22 @@ LOGIN_MAX_ATTEMPTS_PER_MINUTE=10
 SECURITY_EVENT_RETENTION_DAYS=90
 SCHEDULER_TICK_SECONDS=60
 DIGEST_SIGNING_SECRET=PASTE_DIGEST_SIGNING_SECRET
+KEEPERHUB_API_URL=https://app.keeperhub.com
+CREDENTIAL_ENCRYPTION_KEY=PASTE_CREDENTIAL_ENCRYPTION_KEY
 ```
+
+`CREDENTIAL_ENCRYPTION_KEY` (ADR-076) is 32 random bytes, base64, generated with
+`openssl rand -base64 32`. It is what encrypts the KeeperHub keys accounts
+connect for themselves, so a scan revokes as *their* delegated wallet instead of
+only the one the worker's `KEEPERHUB_API_KEY` executes as (ADR-065). Leave it
+empty to keep the feature off: `/api/settings/keeperhub-key` then answers `501`,
+the settings panel hides itself, and every scan falls back to that single
+deployment wallet. `KEEPERHUB_API_URL` is needed on the backend too — it
+validates a key against KeeperHub before storing it.
+
+Rotating `CREDENTIAL_ENCRYPTION_KEY` makes every stored key undecryptable.
+Accounts keep scanning but stop auto-revoking until they reconnect their key, so
+rotate deliberately, not as routine hygiene.
 
 `APP_ENV=production` makes the missing-variable check fatal instead of a warning
 and refuses to expose verification codes over the API (ADR-062). If the backend
@@ -235,8 +250,11 @@ saving, at the cost of a cold start on the first scan.
 
 ## Where the secrets are
 
-The generated `JWT_SECRET`, `INTERNAL_API_TOKEN`, `REDIS_PASSWORD` and
-`DIGEST_SIGNING_SECRET` were written to a scratch file outside the repository so
-they cannot be committed by accident. They live only in that file and in the
-Railway dashboard once pasted. Regenerate them with `openssl rand -hex 32` if
-they are ever exposed.
+The generated `JWT_SECRET`, `INTERNAL_API_TOKEN`, `REDIS_PASSWORD`,
+`DIGEST_SIGNING_SECRET` and `CREDENTIAL_ENCRYPTION_KEY` were written to a scratch
+file outside the repository so they cannot be committed by accident. They live
+only in that file and in the Railway dashboard once pasted. Regenerate them with
+`openssl rand -hex 32` if they are ever exposed —
+`CREDENTIAL_ENCRYPTION_KEY` is the exception: it must be
+`openssl rand -base64 32`, and regenerating it costs every account its connected
+KeeperHub key (see above).

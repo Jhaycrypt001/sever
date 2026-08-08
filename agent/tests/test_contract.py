@@ -120,6 +120,15 @@ def test_agent_consumes_the_task_request_recurring_memory() -> None:
     assert request.seen_approval_keys == []
 
 
+def test_agent_consumes_a_task_request_without_a_keeperhub_key() -> None:
+    """ADR-076 is additive: the fixture predates it and carries no key, and a
+    backend that has not been upgraded sends exactly this. The field must
+    therefore be optional, not merely nullable — a required field here would
+    break every dispatch from an older backend mid-rolling-deploy."""
+    request = TaskRequest(**load("task-request.json"))
+    assert request.keeperhub_api_key is None
+
+
 def test_agent_produces_the_question_callback_shape() -> None:
     # HttpResultSink.request_clarification posts {"question": <str>} (ADR-032).
     fixture = load("question-callback.json")

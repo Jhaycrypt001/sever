@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use serde::Serialize;
 
-use crate::domain::ports::{JobDispatcher, PortError};
+use crate::domain::ports::{DispatchContext, JobDispatcher, PortError};
 use crate::domain::ScanJob;
 
 /// Dispatches jobs to the FastAPI micro-API, which enqueues them via Celery.
@@ -28,6 +28,15 @@ struct TaskRequest<'a> {
     /// Approval keys (chain:token:spender) delivered by previous runs of the
     /// recurring scan.
     seen_approval_keys: &'a [String],
+    /// The account's own KeeperHub key (ADR-076), so the worker executes as
+    /// *that user's* delegated wallet. `None` when the account has not
+    /// connected one, and the worker falls back to its environment key.
+    ///
+    /// This is the one place a plaintext key crosses a process boundary. The
+    /// hop is backend -> agent API over the private network (ADR-006), the same
+    /// channel already carrying `X-Internal-Token`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    keeperhub_api_key: Option<&'a str>,
 }
 
 impl HttpJobDispatcher {
@@ -42,11 +51,7 @@ impl HttpJobDispatcher {
 
 #[async_trait]
 impl JobDispatcher for HttpJobDispatcher {
-    async fn dispatch(
-        &self,
-        job: &ScanJob,
-        seen_approval_keys: &[String],
-    ) -> Result<(), PortError> {
+    async fn dispatch(&self, job: &ScanJob, context: DispatchContext<'_>) -> Result<(), PortError> {
         // Distributed tracing (ADR-029): carry the W3C trace context so the
         // agent joins the same trace. Empty when telemetry is disabled.
         let mut trace_headers = reqwest::header::HeaderMap::new();
@@ -65,7 +70,8 @@ impl JobDispatcher for HttpJobDispatcher {
                 clarification: job.answer.as_deref(),
                 mode: job.mode,
                 recurring: job.recurring_search_id.is_some(),
-                seen_approval_keys,
+                seen_approval_keys: context.seen_approval_keys,
+                keeperhub_api_key: context.keeperhub_api_key,
             })
             .send()
             .await
@@ -91,7 +97,7 @@ impl JobDispatcher for NoopJobDispatcher {
     async fn dispatch(
         &self,
         job: &ScanJob,
-        _seen_approval_keys: &[String],
+        _context: DispatchContext<'_>,
     ) -> Result<(), PortError> {
         tracing::warn!(job_id = %job.id, "NoopJobDispatcher: job not sent to any agent");
         Ok(())
@@ -148,7 +154,10 @@ mod tests {
         let dispatcher = HttpJobDispatcher::new(base_url, "secret".into());
         let job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
 
-        dispatcher.dispatch(&job, &[]).await.unwrap();
+        dispatcher
+            .dispatch(&job, DispatchContext::default())
+            .await
+            .unwrap();
 
         let calls = seen.lock().unwrap();
         // No telemetry configured (ADR-029): no traceparent leaks out.
@@ -156,6 +165,68 @@ mod tests {
             calls.as_slice(),
             &[(Some("secret".into()), Some(job.id.to_string()), None)]
         );
+    }
+
+    #[tokio::test]
+    async fn the_owners_keeperhub_key_travels_with_the_job() {
+        // ADR-076: without this the worker executes as its environment wallet,
+        // and the user's own delegated wallet can never be revoked for.
+        let (base_url, bodies) = spawn_body_stub().await;
+        let dispatcher = HttpJobDispatcher::new(base_url, "secret".into());
+        let job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
+
+        dispatcher
+            .dispatch(
+                &job,
+                DispatchContext {
+                    seen_approval_keys: &[],
+                    keeperhub_api_key: Some("kh_owner"),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            bodies.lock().unwrap()[0]["keeperhub_api_key"],
+            serde_json::json!("kh_owner")
+        );
+    }
+
+    #[tokio::test]
+    async fn an_account_without_a_key_sends_no_key_field() {
+        // Absent rather than null: the agent's request model treats a missing
+        // field as "use the environment key", which is what pre-ADR-076
+        // deployments and unconnected accounts both need.
+        let (base_url, bodies) = spawn_body_stub().await;
+        let dispatcher = HttpJobDispatcher::new(base_url, "secret".into());
+        let job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
+
+        dispatcher
+            .dispatch(&job, DispatchContext::default())
+            .await
+            .unwrap();
+
+        assert!(bodies.lock().unwrap()[0].get("keeperhub_api_key").is_none());
+    }
+
+    /// Stub agent API capturing the JSON body of each dispatch.
+    async fn spawn_body_stub() -> (String, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let bodies: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(vec![]));
+        let captured = bodies.clone();
+        let app = Router::new().route(
+            "/tasks",
+            post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                let captured = captured.clone();
+                async move {
+                    captured.lock().unwrap().push(body);
+                    "queued"
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        (format!("http://{addr}"), bodies)
     }
 
     #[tokio::test]
@@ -179,7 +250,7 @@ mod tests {
             let job = ScanJob::new(Uuid::new_v4(), ADDR).unwrap();
             let span = tracing::info_span!("http_request");
             dispatcher
-                .dispatch(&job, &[])
+                .dispatch(&job, DispatchContext::default())
                 .instrument(span)
                 .await
                 .unwrap();

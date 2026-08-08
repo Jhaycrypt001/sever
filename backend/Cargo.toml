@@ -35,6 +35,8 @@ hmac = "0.13.0"
 utoipa = { version = "5", features = ["chrono", "uuid"] }
 utoipa-swagger-ui = { version = "9", features = ["axum", "vendored"] }
 webauthn_rp = { version = "0.3.0", features = ["serde_relaxed", "serializable_server_state"] }
+chacha20poly1305 = "0.10"
+base64 = "0.22"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

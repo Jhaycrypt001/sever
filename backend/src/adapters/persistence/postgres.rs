@@ -14,10 +14,10 @@ use uuid::Uuid;
 
 use crate::adapters::leader_lock::LeaderLock;
 use crate::domain::ports::{
-    EmailVerificationRepository, JobRepository, PortError, RecurringSearchRepository,
-    RefreshTokenRepository, SecurityAudit, UserRepository,
+    EmailVerificationRepository, JobRepository, KeeperHubCredentialRepository, PortError,
+    RecurringSearchRepository, RefreshTokenRepository, SecurityAudit, UserRepository,
 };
-use crate::domain::{CodePurpose, EmailVerification, SecurityEvent};
+use crate::domain::{CodePurpose, EmailVerification, KeeperHubCredential, SecurityEvent};
 
 /// Advisory-lock key for the background loop (ADR-053): a fixed application id
 /// so every replica contends on the same lock.
@@ -256,6 +256,79 @@ fn finding_from_row(row: &PgRow) -> Result<ApprovalFinding, PortError> {
         revocation_tx_hash: row.get("revocation_tx_hash"),
         raw: row.get("raw"),
     })
+}
+
+// ------------------------------------------------- keeperhub credentials
+
+pub struct PostgresKeeperHubCredentialRepository {
+    pool: PgPool,
+}
+
+impl PostgresKeeperHubCredentialRepository {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+fn keeperhub_credential_from_row(row: &PgRow) -> KeeperHubCredential {
+    KeeperHubCredential {
+        user_id: row.get("user_id"),
+        api_key_encrypted: row.get("api_key_encrypted"),
+        wallet_address: row.get("wallet_address"),
+        masked: row.get("masked"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+#[async_trait]
+impl KeeperHubCredentialRepository for PostgresKeeperHubCredentialRepository {
+    async fn upsert(&self, credential: &KeeperHubCredential) -> Result<(), PortError> {
+        // Rotating a key keeps the original created_at: the account's
+        // connection to KeeperHub is what began then, not this particular
+        // string.
+        sqlx::query(
+            "INSERT INTO keeperhub_credentials \
+             (user_id, api_key_encrypted, wallet_address, masked, created_at, updated_at) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (user_id) DO UPDATE SET \
+                 api_key_encrypted = EXCLUDED.api_key_encrypted, \
+                 wallet_address = EXCLUDED.wallet_address, \
+                 masked = EXCLUDED.masked, \
+                 updated_at = EXCLUDED.updated_at",
+        )
+        .bind(credential.user_id)
+        .bind(&credential.api_key_encrypted)
+        .bind(&credential.wallet_address)
+        .bind(&credential.masked)
+        .bind(credential.created_at)
+        .bind(credential.updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn find(&self, user_id: Uuid) -> Result<Option<KeeperHubCredential>, PortError> {
+        let row = sqlx::query(
+            "SELECT user_id, api_key_encrypted, wallet_address, masked, created_at, updated_at \
+             FROM keeperhub_credentials WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(db_err)?;
+        Ok(row.as_ref().map(keeperhub_credential_from_row))
+    }
+
+    async fn delete(&self, user_id: Uuid) -> Result<bool, PortError> {
+        let result = sqlx::query("DELETE FROM keeperhub_credentials WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(db_err)?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 // ---------------------------------------------------------------- users

@@ -1,19 +1,23 @@
 pub mod approval_finding;
 pub mod email_verification;
 pub mod job;
+pub mod keeperhub_credential;
 pub mod passkey;
 pub mod ports;
 pub mod recurring;
 pub mod refresh_token;
+pub mod secret_box;
 pub mod security_event;
 pub mod user;
 
 pub use approval_finding::{sort_by_risk, ApprovalFinding, RevocationStatus, RiskTier};
 pub use email_verification::{CodePurpose, EmailVerification};
 pub use job::{AgentStep, JobMode, JobStatus, JobUsage, ScanJob};
+pub use keeperhub_credential::{can_revoke_for, KeeperHubCredential};
 pub use passkey::{CeremonyPurpose, PasskeyCredential, WebauthnCeremony};
 pub use recurring::RecurringSearch;
 pub use refresh_token::RefreshToken;
+pub use secret_box::{mask, SecretBox, SecretBoxError};
 pub use security_event::{SecurityEvent, SecurityEventKind};
 pub use user::User;
 

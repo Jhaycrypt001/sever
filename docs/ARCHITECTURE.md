@@ -2889,6 +2889,84 @@ leaves the database and the wire paying for rows nobody renders.
 
 ---
 
+### ADR-076 — Each account brings its own KeeperHub key (decided 2026-08-08)
+
+**Context**: ADR-065 established that KeeperHub executes as exactly **one**
+wallet — the one delegated to the API key — and that Sever therefore refuses a
+revocation (`not_attempted`) when the scanned wallet is not that wallet. With a
+single deployment-wide key in the worker's environment, that made auto-revoke
+work for exactly one wallet in the world: the deployment's own. Everyone else
+got a scan that finds their dangerous approvals, explains them, and then
+declines to do the one thing the product exists to do.
+
+The gap is not a bug in the check. The check is correct — sending someone
+else's revocation through our wallet would simply fail onchain, and a product
+that pretended otherwise would be worse. The gap is that the deployment had no
+way to act *as* the user.
+
+**Decision**: an account may connect its own KeeperHub API key, and Sever uses
+**that account's** key when scanning for **that account**. The delegation check
+then passes by construction rather than by coincidence: their key executes as
+their wallet.
+
+Consequences of holding a user credential, and what each one forced:
+
+- **Encrypted, not hashed.** Unlike a password, the key must be *recoverable* —
+  it has to be sent to KeeperHub. So this is encryption with a key the
+  deployment holds (`CREDENTIAL_ENCRYPTION_KEY`), not a one-way hash.
+  XChaCha20-Poly1305: its 192-bit nonce is safe to draw at random with no
+  counter to maintain, which AES-GCM's 96-bit nonce is not, and being an AEAD a
+  tampered row fails to decrypt rather than decrypting to something an attacker
+  chose. `SecretBox` deliberately derives no `Debug` — a derived one on a key
+  schedule ends up in a log line eventually.
+- **Encryption happens in the use case, above the port.** The repository takes
+  an already-sealed envelope. No adapter and no database ever holds plaintext,
+  so a Postgres backup, a query log, or a future second storage adapter cannot
+  leak keys.
+- **Validated before it is stored.** `connect` calls KeeperHub `GET /api/user`
+  first: a rejected key is never persisted, and the wallet it executes as is
+  recorded and shown, so a person can see *which* wallet they just armed before
+  trusting it. A directory that is merely unreachable returns **502**, not 422
+  — sending someone off to re-check a perfectly good key is the wrong advice.
+- **The key never comes back out.** `KeeperHubKeyView` has no field that could
+  carry it — the type is the guarantee, not a convention — and the contract
+  fixture pins the shape so a field cannot be added without a test failing.
+  The console shows `••••` plus four characters, enough to tell two keys apart
+  and not enough to reconstruct either.
+- **One decrypt point.** `api_key_for` is the only place a key is opened, and a
+  decrypt failure logs and returns `None` rather than failing the scan: a
+  rotated `CREDENTIAL_ENCRYPTION_KEY` degrades to "no auto-revoke", not to "no
+  scanning".
+- **The whole feature is optional.** With no `CREDENTIAL_ENCRYPTION_KEY` there
+  is nowhere safe to put a key, so the routes answer **501** and scans fall
+  back to the worker's environment key. A deployment that never wanted this is
+  correctly configured, not degraded — hence no production warning.
+
+The key travels to the worker on the existing private-network dispatch
+(ADR-006), in the request body that already carries `X-Internal-Token`. This is
+the one place plaintext crosses a process boundary, and it is the same hop and
+the same trust boundary as every other job field. The field is omitted rather
+than sent as null when absent, so a worker running against a backend that
+predates this — and an account that has connected nothing — both keep the
+previous behaviour unchanged.
+
+**Consequences**: auto-revoke works for any account willing to connect a key,
+which is what makes the product a product rather than a demo. The scheduler
+(ADR-033) shares the *same* key store instance as the HTTP routes, because the
+unattended run is the one that most needs the owner's key — it is the run that
+can revoke a dangerous approval before the owner has seen it.
+
+Sever holds no private keys and no seed phrases; a KeeperHub API key is a
+capability that KeeperHub can revoke, which is a materially smaller thing to
+hold than a wallet. It is still a credential that can move a user's tokens, and
+that is the reason for every constraint above rather than a reason to wave them
+through. Rejected: asking users for a seed phrase (Sever would become a
+custodian, and no amount of encryption makes that the right shape); and a
+shared deployment key with a wallet-allowlist (it cannot work — KeeperHub
+executes as its delegated wallet regardless of what we allow).
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)
@@ -2911,6 +2989,9 @@ leaves the database and the wire paying for rows nobody renders.
 | POST | `/api/recurring` | Saves a recurring scan `{wallet_address, mode?, interval_minutes, webhook_url?}` (ADR-033/036) |
 | GET | `/api/recurring` | Lists the user's recurring scans |
 | DELETE | `/api/recurring/{id}` | Deletes a recurring scan (run history is kept) |
+| GET | `/api/settings/keeperhub-key` | The connected key as `{wallet_address, masked}`, or `null` (ADR-076; `501` when the deployment has no encryption key) |
+| PUT | `/api/settings/keeperhub-key` | Connects `{api_key}` after validating it against KeeperHub (ADR-076; `422` rejected, `502` KeeperHub unreachable) |
+| DELETE | `/api/settings/keeperhub-key` | Forgets the stored key; scans keep running without auto-revoke (ADR-076) |
 
 All `/api/*` routes can answer `429` (per-IP rate limit; `POST /api/searches`
 also enforces the per-user daily quota — ADR-017; `POST /api/auth/login` also
@@ -2920,7 +3001,7 @@ enforces a per-account throttle — ADR-057).
 
 | Method | Route | Description |
 |---|---|---|
-| POST | `/tasks` | `{job_id, wallet_address, mode, clarification?, recurring, seen_approval_keys}` → Celery enqueue |
+| POST | `/tasks` | `{job_id, wallet_address, mode, clarification?, recurring, seen_approval_keys, keeperhub_api_key?}` → Celery enqueue. The key is **omitted** (not null) when the account has connected none, and the worker then falls back to its environment key (ADR-076) |
 
 ### Outbound (Rust → the user's systems)
 
