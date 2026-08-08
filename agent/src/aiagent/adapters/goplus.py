@@ -3,9 +3,14 @@
 One call to GoPlus's `token_approval_security` v2 endpoint returns, per
 chain, every outstanding ERC-20 approval for a wallet *with* the risk
 signals already attached — no separate lookup per spender. Verified live
-against the public API (keyless, rate-limited without `GOPLUS_API_KEY`):
+against the public API, which works keyless at a lower rate limit:
 
     GET https://api.gopluslabs.io/api/v2/token_approval_security/{chain_id}?addresses={wallet}
+
+Authentication is a token exchange, not an API key (ADR-077): `GOPLUS_API_KEY`
+and `GOPLUS_APP_SECRET` are signed into a short-lived access token, and that
+token is the `Authorization` header. Sending the App Key directly is served
+anonymously with a `200`, which is why the old scheme was invisible.
 
 The response nests one entry per approved token, each with an
 `approved_list` of spenders. GoPlus flags malice at *two* levels that this
@@ -18,6 +23,7 @@ dangerous: approving a scam token still burns gas/exposes the wallet to the
 spender, and a malicious spender is dangerous regardless of the token.
 """
 
+import hashlib
 import logging
 import time
 from datetime import UTC, datetime
@@ -31,6 +37,14 @@ from aiagent.domain.usage import UsageMeter
 logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://api.gopluslabs.io/api/v2/token_approval_security"
+
+#: Where an App Key + Secret are exchanged for a short-lived access token
+#: (ADR-077). The scan endpoint accepts that token, never the App Key.
+_TOKEN_URL = "https://api.gopluslabs.io/api/v1/token"
+
+#: Seconds shaved off the advertised token lifetime before treating it as
+#: expired, so a token cannot lapse in flight between the check and the call.
+_TOKEN_SKEW_SECONDS = 60
 
 #: "partial data obtained" — GoPlus is still indexing the address. Transient
 #: (ADR-066), unlike 2018, which is a settled "no such chain".
@@ -109,6 +123,7 @@ class GoPlusApprovalSource:
         meter: UsageMeter | None = None,
         client: httpx.Client | None = None,
         api_key: str = "",
+        app_secret: str = "",
         timeout: float = 15.0,
         partial_retries: int = 3,
         partial_retry_delay: float = 1.5,
@@ -116,24 +131,79 @@ class GoPlusApprovalSource:
         self._meter = meter
         self._client = client or httpx.Client(timeout=timeout)
         self._api_key = api_key
+        self._app_secret = app_secret
+        #: Cached access token and the moment it stops being usable. Held on
+        #: the instance, so one exchange covers every chain in a scan.
+        self._token: str | None = None
+        self._token_expires_at = 0.0
         # Retries for `code 2` only (ADR-066). Linear backoff: indexing a cold
         # address takes seconds, not minutes, and the worker holds a Celery
         # slot while it waits.
         self._partial_retries = partial_retries
         self._partial_retry_delay = partial_retry_delay
 
+    def _access_token(self, force_refresh: bool = False) -> str | None:
+        """The cached access token, exchanging for a new one when needed.
+
+        Returns `None` whenever authentication is not possible — no
+        credentials, or GoPlus refusing the exchange. The caller then scans
+        anonymously, which is exactly what happened before a key was
+        configured: a lower rate limit, not a broken scan.
+        """
+        if not self._api_key or not self._app_secret:
+            return None
+        if not force_refresh and self._token and time.time() < self._token_expires_at:
+            return self._token
+
+        # GoPlus authenticates the exchange with sha1(app_key + time + secret).
+        # The secret proves possession without ever being transmitted.
+        now = int(time.time())
+        sign = hashlib.sha1(f"{self._api_key}{now}{self._app_secret}".encode()).hexdigest()
+        try:
+            response = self._client.post(
+                _TOKEN_URL,
+                json={"app_key": self._api_key, "time": now, "sign": sign},
+            )
+            response.raise_for_status()
+            payload = response.json()
+            token = (payload.get("result") or {}).get("access_token")
+            if not token:
+                raise RuntimeError(f"no access token in the response: {payload.get('message')}")
+            expires_in = float((payload.get("result") or {}).get("expires_in") or 0)
+        except Exception:  # noqa: BLE001 - degrading to anonymous, never failing the scan
+            logger.warning(
+                "GoPlus token exchange failed; scanning on the anonymous tier",
+                exc_info=True,
+            )
+            self._token = None
+            self._token_expires_at = 0.0
+            return None
+
+        self._token = str(token)
+        self._token_expires_at = time.time() + max(expires_in - _TOKEN_SKEW_SECONDS, 0.0)
+        return self._token
+
     def fetch_approvals(self, wallet_address: str, chain_id: str) -> list[RawApproval]:
         if self._meter is not None:
             self._meter.record_search()
-        headers = {"Authorization": self._api_key} if self._api_key else {}
 
         payload: dict[str, Any] = {}
+        refreshed = False
         for attempt in range(self._partial_retries + 1):
+            token = self._access_token()
+            headers = {"Authorization": token} if token else {}
             response = self._client.get(
                 f"{_BASE_URL}/{chain_id}",
                 params={"addresses": wallet_address},
                 headers=headers,
             )
+            # A token can expire mid-scan. One forced refresh and one retry:
+            # if a freshly minted token is also refused, the problem is the
+            # credentials, and retrying would only spin.
+            if response.status_code == httpx.codes.UNAUTHORIZED and token and not refreshed:
+                refreshed = True
+                self._access_token(force_refresh=True)
+                continue
             response.raise_for_status()
             payload = response.json()
             code = payload.get("code")

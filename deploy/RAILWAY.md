@@ -155,7 +155,8 @@ AGENT_ORCHESTRATOR=langgraph
 KEEPERHUB_API_URL=https://app.keeperhub.com
 KEEPERHUB_API_KEY=PASTE_KEEPERHUB_API_KEY
 AGENT_SCAN_CHAIN_IDS=1,56,8453
-GOPLUS_API_KEY=PASTE_GOPLUS_API_KEY_OR_LEAVE_EMPTY
+GOPLUS_API_KEY=PASTE_GOPLUS_APP_KEY_OR_LEAVE_EMPTY
+GOPLUS_APP_SECRET=PASTE_GOPLUS_APP_SECRET_OR_LEAVE_EMPTY
 ANTHROPIC_API_KEY=PASTE_ANTHROPIC_API_KEY_OR_LEAVE_EMPTY
 AGENT_MODEL_ID=claude-opus-4-8
 AGENT_MAX_STEPS=5
@@ -175,10 +176,19 @@ approvals on. Adding Polygon or Arbitrum produces `code 2029` per request.
 
 `code 2029` on a *supported* chain is a rate limit, not a rejection — verified
 on 2026-08-05, when Ethereum returned 2029 for one scan and full approval data
-for the next. Without `GOPLUS_API_KEY` the worker is on the anonymous tier and
-this happens under any burst; the run survives as `degraded` (ADR-064) but the
-report carries a banner saying that chain was not reached. Set `GOPLUS_API_KEY`
-before anything anyone is watching.
+for the next. On the anonymous tier this happens under any burst; the run
+survives as `degraded` (ADR-064) but the report carries a banner saying that
+chain was not reached. Set the GoPlus credentials before anything anyone is
+watching.
+
+Set `GOPLUS_API_KEY` **and** `GOPLUS_APP_SECRET` together, or neither. They are
+the App Key and App Secret from the GoPlus dashboard, and the key alone
+authenticates nothing: the worker signs `sha1(app_key + unix_time + app_secret)`
+and exchanges it at `/api/v1/token` for a short-lived access token, which is
+what the scan endpoint actually accepts (ADR-077). With only one of the two set
+the worker stays anonymous — silently, by design, since a failed exchange must
+degrade the rate limit rather than fail the scan. If the banner persists after
+setting them, check the worker log for `GoPlus token exchange failed`.
 
 Leaving `ANTHROPIC_API_KEY` empty is safe and cheap: risk tiers come from the
 deterministic classifier either way (ADR-060), and only the prose explanation

@@ -2967,6 +2967,50 @@ executes as its delegated wallet regardless of what we allow).
 
 ---
 
+### ADR-077 — GoPlus is authenticated by token exchange, not by API key (decided 2026-08-08, closes the ADR-074 gap)
+
+**Context**: the adapter sent `GOPLUS_API_KEY` as the `Authorization` header.
+That is not GoPlus's scheme, and it fails in the worst available way: the
+endpoint answers `200` and serves the request *anonymously*. Nothing errors,
+no test fails, and an operator who has set a key — and reasonably believes they
+are on the paid tier — is still on the shared anonymous rate limit. ADR-074
+named this and deliberately deferred it, having spent its decision on the
+`2029` retry that made the throttling survivable. This closes it.
+
+**Decision**: exchange credentials for a token, as GoPlus documents. The App
+Key and App Secret are signed together with a Unix timestamp —
+`sha1(app_key + time + app_secret)` — and POSTed to `/api/v1/token`; the
+short-lived `access_token` that comes back is what the scan endpoint accepts.
+
+Three properties matter more than the exchange itself:
+
+- **Cached on the adapter instance**, expiring `_TOKEN_SKEW_SECONDS` early. A
+  scan sweeps three chains; one exchange covers all of them, and the skew stops
+  a token from lapsing in flight between the expiry check and the call.
+- **One forced refresh on a `401`, then the retry.** A token can expire
+  mid-scan and that is recoverable. A freshly minted token being refused is not
+  — it means the credentials are wrong — so the retry does not loop.
+- **A failed exchange degrades to anonymous, it does not fail the scan.** The
+  worst outcome of unreachable-GoPlus-auth is the rate limit we already lived
+  with; refusing to scan would be strictly worse. Same reasoning for a key
+  configured without a secret: the pair is meaningless split, so the adapter
+  stays anonymous rather than sending a request it knows will not authenticate.
+
+**Consequences**: `GOPLUS_APP_SECRET` joins `GOPLUS_API_KEY` in `Settings`,
+`.env.example` and the Railway worker service, and the two must be set
+together. The secret is never transmitted — only the SHA-1 that proves
+possession — and a test asserts that, because a signing scheme that leaked its
+secret into the request body would be worse than the header it replaces.
+
+Degrading silently is the one uncomfortable part of this decision: an operator
+whose exchange fails gets the anonymous tier and no error. The alternative —
+failing the scan on an auth problem — trades a rate limit for an outage, which
+inverts the ADR-064 preference for a degraded-but-honest result. The
+compromise is a `warning` log naming the exchange, and the throttle banner the
+user already sees when it bites.
+
+---
+
 ## 4. API contracts (summary)
 
 ### Public (Next.js → Rust)

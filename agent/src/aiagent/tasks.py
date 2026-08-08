@@ -68,7 +68,11 @@ def build_providers(
 
     from aiagent.adapters.goplus import GoPlusApprovalSource
 
-    source = GoPlusApprovalSource(meter=meter, api_key=settings.goplus_api_key)
+    source = GoPlusApprovalSource(
+        meter=meter,
+        api_key=settings.goplus_api_key,
+        app_secret=settings.goplus_app_secret,
+    )
 
     if not llm_is_configured(settings):
         # ADR-060: real data, real tiers, real revocations, templated prose.

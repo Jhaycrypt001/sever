@@ -1,6 +1,9 @@
 """GoPlus ApprovalSource adapter: maps the real API response shape (verified
 live against https://api.gopluslabs.io) into RawApproval (ADR-058)."""
 
+import hashlib
+import json
+
 import httpx
 import pytest
 import respx
@@ -229,13 +232,132 @@ def test_a_missing_message_key_is_handled_too() -> None:
 
 
 @respx.mock
-def test_api_key_is_sent_when_configured() -> None:
+def test_a_key_without_a_secret_stays_anonymous() -> None:
+    """An App Key alone cannot be signed, so there is nothing to exchange.
+
+    GoPlus ignores an unrecognised Authorization header rather than refusing
+    the call, so sending the bare key looks like it works while leaving every
+    request on the anonymous tier. Sending no header at all is the same tier
+    and does not imply otherwise.
+    """
+    token = respx.post("https://api.gopluslabs.io/api/v1/token")
     route = respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
         return_value=httpx.Response(200, json={"code": 1, "message": "ok", "result": []})
     )
-    GoPlusApprovalSource(api_key="secret-key").fetch_approvals(WALLET, "1")
 
-    assert route.calls.last.request.headers["authorization"] == "secret-key"
+    GoPlusApprovalSource(api_key="app-key").fetch_approvals(WALLET, "1")
+
+    assert not token.called
+    assert "authorization" not in route.calls.last.request.headers
+
+
+@respx.mock
+def test_a_key_and_secret_are_exchanged_for_an_access_token() -> None:
+    token = respx.post("https://api.gopluslabs.io/api/v1/token").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 1,
+                "message": "ok",
+                "result": {"access_token": "tok-1", "expires_in": 3600},
+            },
+        )
+    )
+    route = respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
+        return_value=httpx.Response(200, json={"code": 1, "message": "ok", "result": []})
+    )
+
+    GoPlusApprovalSource(api_key="app-key", app_secret="app-secret").fetch_approvals(WALLET, "1")
+
+    # The access token authenticates the scan, never the App Key or the secret.
+    assert route.calls.last.request.headers["authorization"] == "tok-1"
+    body = json.loads(token.calls.last.request.content)
+    assert body["app_key"] == "app-key"
+    assert "app-secret" not in json.dumps(body), "the secret must never leave as plaintext"
+    # sha1(app_key + time + app_secret), the scheme GoPlus documents.
+    expected = hashlib.sha1(f"app-key{body['time']}app-secret".encode()).hexdigest()
+    assert body["sign"] == expected
+
+
+@respx.mock
+def test_the_token_is_reused_across_scans() -> None:
+    """One exchange, not one per chain: a three-chain scan would otherwise
+    spend three of the rate-limited token calls the key exists to avoid."""
+    token = respx.post("https://api.gopluslabs.io/api/v1/token").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "code": 1,
+                "message": "ok",
+                "result": {"access_token": "tok-1", "expires_in": 3600},
+            },
+        )
+    )
+    respx.get(url__regex=r".*/token_approval_security/\d+").mock(
+        return_value=httpx.Response(200, json={"code": 1, "message": "ok", "result": []})
+    )
+    source = GoPlusApprovalSource(api_key="app-key", app_secret="app-secret")
+
+    source.fetch_approvals(WALLET, "1")
+    source.fetch_approvals(WALLET, "56")
+    source.fetch_approvals(WALLET, "8453")
+
+    assert token.call_count == 1
+
+
+@respx.mock
+def test_an_expired_token_is_refreshed_once_and_the_scan_retried() -> None:
+    token = respx.post("https://api.gopluslabs.io/api/v1/token").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "code": 1,
+                    "message": "ok",
+                    "result": {"access_token": "stale", "expires_in": 3600},
+                },
+            ),
+            httpx.Response(
+                200,
+                json={
+                    "code": 1,
+                    "message": "ok",
+                    "result": {"access_token": "fresh", "expires_in": 3600},
+                },
+            ),
+        ]
+    )
+    route = respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
+        side_effect=[
+            httpx.Response(401, json={"code": 4011, "message": "token expired"}),
+            httpx.Response(200, json={"code": 1, "message": "ok", "result": []}),
+        ]
+    )
+
+    GoPlusApprovalSource(api_key="app-key", app_secret="app-secret").fetch_approvals(WALLET, "1")
+
+    assert token.call_count == 2
+    assert route.calls.last.request.headers["authorization"] == "fresh"
+
+
+@respx.mock
+def test_a_failed_exchange_degrades_to_anonymous_rather_than_failing_the_scan() -> None:
+    """Losing the higher rate limit is worth a warning; losing the findings is
+    not. An unauthenticated scan still reports real approvals (ADR-064 marks
+    what it could not reach), so a broken token endpoint must not abort it."""
+    respx.post("https://api.gopluslabs.io/api/v1/token").mock(
+        return_value=httpx.Response(500, json={"code": 5000, "message": "boom"})
+    )
+    route = respx.get("https://api.gopluslabs.io/api/v2/token_approval_security/1").mock(
+        return_value=httpx.Response(200, json={"code": 1, "message": "ok", "result": []})
+    )
+
+    approvals = GoPlusApprovalSource(api_key="app-key", app_secret="app-secret").fetch_approvals(
+        WALLET, "1"
+    )
+
+    assert approvals == []
+    assert "authorization" not in route.calls.last.request.headers
 
 
 @respx.mock

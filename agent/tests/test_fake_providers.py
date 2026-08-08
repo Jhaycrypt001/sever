@@ -34,6 +34,7 @@ def settings_with(providers: str) -> Settings:
         providers=providers,
         scan_chain_ids=["1", "8453"],
         goplus_api_key="",
+        goplus_app_secret="",
         keeperhub_api_url="https://app.keeperhub.com",
         keeperhub_api_key="",
         keeperhub_simulate_only=False,

@@ -82,10 +82,16 @@ class Settings:
     # Ethereum, Base, Arbitrum, Polygon — matches KeeperHub's supported chains
     # (Sepolia excluded by default; add "11155111" for testnet demos).
     scan_chain_ids: list[str]
-    # GoPlus Security API key (ADR-058): optional — the approval-list and
-    # malicious-address endpoints work keyless at a lower rate limit; set for
-    # sustained/production use. https://gopluslabs.io
+    # GoPlus Security credentials (ADR-058, ADR-077): optional — the
+    # approval-list and malicious-address endpoints work keyless at a lower
+    # rate limit; set for sustained/production use. https://gopluslabs.io
+    #
+    # Both are needed together. GoPlus does not accept the App Key as a
+    # credential: it is exchanged, signed with the secret, for a short-lived
+    # access token. A key on its own authenticates nothing, so the adapter
+    # stays on the anonymous tier until the secret is set too.
     goplus_api_key: str
+    goplus_app_secret: str
     # KeeperHub execution layer (ADR-058): the org's API base URL and `kh_`
     # key used for direct on-chain execution (execute_contract_call).
     keeperhub_api_url: str
@@ -146,6 +152,7 @@ class Settings:
                 if chain_id.strip()
             ],
             goplus_api_key=os.environ.get("GOPLUS_API_KEY", ""),
+            goplus_app_secret=os.environ.get("GOPLUS_APP_SECRET", ""),
             keeperhub_api_url=os.environ.get("KEEPERHUB_API_URL", "https://app.keeperhub.com"),
             keeperhub_api_key=os.environ.get("KEEPERHUB_API_KEY", ""),
             keeperhub_simulate_only=os.environ.get("KEEPERHUB_SIMULATE_ONLY", "").lower()

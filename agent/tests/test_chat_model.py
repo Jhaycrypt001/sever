@@ -17,6 +17,7 @@ def settings(**overrides) -> Settings:
         providers="live",
         scan_chain_ids=["1"],
         goplus_api_key="",
+        goplus_app_secret="",
         keeperhub_api_url="https://app.keeperhub.com",
         keeperhub_api_key="kh_key",
         keeperhub_simulate_only=False,
